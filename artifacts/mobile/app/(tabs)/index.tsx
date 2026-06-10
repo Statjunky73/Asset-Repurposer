@@ -47,6 +47,12 @@ const FORMATS = [
     icon: "newspaper-variant-outline" as const,
     desc: "Short teaser paragraph",
   },
+  {
+    id: "youtube",
+    label: "YouTube Description",
+    icon: "youtube" as const,
+    desc: "Title + SEO description",
+  },
 ];
 
 const TONES = ["Casual", "Professional", "Bold", "Witty", "Inspiring"];

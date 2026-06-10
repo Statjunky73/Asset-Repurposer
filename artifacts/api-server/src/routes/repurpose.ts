@@ -7,7 +7,7 @@ const router = Router();
 const RepurposeBodySchema = z.object({
   content: z.string().min(1).max(10000),
   formats: z
-    .array(z.enum(["tweet", "linkedin", "tiktok", "email", "newsletter"]))
+    .array(z.enum(["tweet", "linkedin", "tiktok", "email", "newsletter", "youtube"]))
     .min(1),
   tone: z.enum(["Casual", "Professional", "Bold", "Witty", "Inspiring"]),
 });
@@ -18,6 +18,7 @@ const FORMAT_INSTRUCTIONS: Record<string, string> = {
   tiktok: `"tiktok": a string with 3 alternative TikTok/Reels hooks (each 1-2 sentences, separated by \\n\\n, numbered 1. 2. 3.)`,
   email: `"email": a string with 5 email subject lines, each on a new line, numbered 1-5`,
   newsletter: `"newsletter": a string for a newsletter teaser paragraph (2-3 sentences, creates curiosity, invites click-through)`,
+  youtube: `"youtube": a string with a YouTube video title (max 70 chars, SEO-optimised, no clickbait) on the first line, then a blank line, then a 150-200 word video description (hooks viewers, includes relevant keywords, ends with a subscribe CTA)`,
 };
 
 router.post("/repurpose", async (req, res) => {
