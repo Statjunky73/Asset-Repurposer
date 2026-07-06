@@ -1,9 +1,13 @@
 import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
+import { Image } from "expo-image";
+import * as ImageManipulator from "expo-image-manipulator";
+import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Linking,
   Platform,
   ScrollView,
   StyleSheet,
@@ -13,103 +17,177 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { PolicyWarnings, type PolicyFlag } from "@/components/PolicyWarnings";
+import { RemixableField } from "@/components/RemixableField";
 import { useColors } from "@/hooks/useColors";
+import { useSettings } from "@/hooks/useSettings";
+import { apiUrl } from "@/lib/apiBase";
+import { extractVideoFrame } from "@/lib/extractVideoFrame";
+import { PLATFORMS } from "@/lib/platforms";
+import { callRemix } from "@/lib/remix";
+import type { HandlePlatformId } from "@/lib/settings";
 
-const FORMATS = [
-  {
-    id: "tweet",
-    label: "X Thread",
-    icon: "twitter" as const,
-    desc: "3-part tweet thread",
-  },
-  {
-    id: "linkedin",
-    label: "LinkedIn Post",
-    icon: "linkedin" as const,
-    desc: "Professional story post",
-  },
-  {
-    id: "tiktok",
-    label: "TikTok Hook",
-    icon: "music-note" as const,
-    desc: "Scroll-stopping opener",
-  },
-  {
-    id: "email",
-    label: "Email Subject",
-    icon: "email-outline" as const,
-    desc: "5 subject line options",
-  },
-  {
-    id: "newsletter",
-    label: "Newsletter Blurb",
-    icon: "newspaper-variant-outline" as const,
-    desc: "Short teaser paragraph",
-  },
-  {
-    id: "youtube",
-    label: "YouTube Description",
-    icon: "youtube" as const,
-    desc: "Title + SEO description",
-  },
-];
+type SuggestedPlatformId = Exclude<HandlePlatformId, "substack">;
 
-const TONES = ["Casual", "Professional", "Bold", "Witty", "Inspiring"];
+type PlatformSuggestion = {
+  id: SuggestedPlatformId;
+  label: string;
+  reason: string;
+};
 
-const EXAMPLE =
-  "I spent 6 months learning to wake up at 5am every day, and here's what actually happened. The first week was brutal — I failed 4 out of 7 days. But by month 2, I discovered it wasn't about willpower at all. It was about what I did the night before. The secret: I stopped optimizing my mornings and started designing my evenings instead. Prep your clothes, set a specific intention for the morning, and get off screens 90 minutes before bed. Now I wake up before my alarm. Every single day.";
+type MediaAnalysisResult = {
+  summary: string;
+  caption: string;
+  hashtags: string[];
+  platforms: PlatformSuggestion[];
+};
 
-export default function RepurposeScreen() {
+type SelectedMedia = {
+  kind: "photo" | "video";
+  previewUri: string;
+};
+
+export default function CreateScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const { settings } = useSettings();
 
-  const [content, setContent] = useState("");
-  const [selectedFormats, setSelectedFormats] = useState<string[]>([
-    "tweet",
-    "linkedin",
-  ]);
-  const [tone, setTone] = useState("Casual");
-  const [results, setResults] = useState<Record<string, string> | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [media, setMedia] = useState<SelectedMedia | null>(null);
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [result, setResult] = useState<MediaAnalysisResult | null>(null);
   const [error, setError] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [personalContext, setPersonalContext] = useState("");
 
-  const wordCount = content.split(/\s+/).filter(Boolean).length;
-  const canGenerate =
-    !loading && content.trim().length > 0 && selectedFormats.length > 0;
+  const [editedCaption, setEditedCaption] = useState("");
+  const [editedHashtags, setEditedHashtags] = useState("");
+  const [policyFlags, setPolicyFlags] = useState<PolicyFlag[]>([]);
+  const [activePlatform, setActivePlatform] = useState<SuggestedPlatformId | null>(null);
+  const [optimizingPlatform, setOptimizingPlatform] = useState<SuggestedPlatformId | null>(null);
 
-  const toggleFormat = (id: string) => {
+  const lastCheckedCaptionRef = useRef<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const canGenerate = !preparing && !analyzing && !!imageBase64;
+
+  const pickMedia = async () => {
+    setError("");
+    setResult(null);
+    setPolicyFlags([]);
+    setActivePlatform(null);
+
+    if (Platform.OS !== "web") {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setError("We need access to your photos to continue.");
+        return;
+      }
+    }
+
+    const picked = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images", "videos"],
+      quality: 0.9,
+    });
+    if (picked.canceled || !picked.assets?.[0]) return;
+
+    const asset = picked.assets[0];
+    const kind: "photo" | "video" = asset.type === "video" ? "video" : "photo";
+
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setSelectedFormats((prev) =>
-      prev.includes(id) ? prev.filter((f) => f !== id) : [...prev, id]
-    );
+    setPreparing(true);
+    setMedia(null);
+    setImageBase64(null);
+
+    try {
+      const frameUri = kind === "video" ? await extractVideoFrame(asset.uri) : asset.uri;
+      const manipulated = await ImageManipulator.manipulateAsync(
+        frameUri,
+        [{ resize: { width: 1024 } }],
+        {
+          compress: 0.7,
+          format: ImageManipulator.SaveFormat.JPEG,
+          base64: true,
+        }
+      );
+      setMedia({ kind, previewUri: manipulated.uri });
+      setImageBase64(manipulated.base64 ?? null);
+    } catch {
+      setError("Couldn't process that file. Try a different photo or video.");
+    } finally {
+      setPreparing(false);
+    }
   };
 
-  const repurpose = async () => {
-    if (!canGenerate) return;
-    setLoading(true);
-    setResults(null);
+  const analyze = async () => {
+    if (!canGenerate || !media || !imageBase64) return;
+    setAnalyzing(true);
+    setResult(null);
     setError("");
+    setPolicyFlags([]);
+    setActivePlatform(null);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
-      const domain = process.env.EXPO_PUBLIC_DOMAIN;
-      const res = await fetch(`https://${domain}/api/repurpose`, {
+      const res = await fetch(apiUrl("/api/analyze-media"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, formats: selectedFormats, tone }),
+        body: JSON.stringify({
+          mediaType: media.kind,
+          imageBase64,
+          mimeType: "image/jpeg",
+          voice: settings.voice,
+          personalContext: personalContext.trim() || null,
+        }),
       });
       if (!res.ok) throw new Error("Server error");
       const data = await res.json();
-      setResults(data.results);
+      setResult(data.result);
+      setEditedCaption(data.result.caption);
+      setEditedHashtags(data.result.hashtags.map((h: string) => `#${h}`).join(" "));
+      setPolicyFlags(data.policyFlags ?? []);
+      lastCheckedCaptionRef.current = data.result.caption;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch {
       setError("Something went wrong. Please try again.");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setLoading(false);
+      setAnalyzing(false);
     }
   };
+
+  // Re-scan the caption text for policy concerns whenever it changes (debounced),
+  // merging with — not replacing — any flags already found on the image itself.
+  useEffect(() => {
+    if (!result) return;
+    if (editedCaption === lastCheckedCaptionRef.current) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      lastCheckedCaptionRef.current = editedCaption;
+      try {
+        const res = await fetch(apiUrl("/api/policy-check-text"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: editedCaption }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        setPolicyFlags((prev) => [
+          ...prev.filter((f) => f.source !== "text"),
+          ...(data.policyFlags ?? []),
+        ]);
+      } catch {
+        // Background check — fail silently, don't interrupt the user.
+      }
+    }, 1200);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editedCaption, result]);
 
   const copyText = async (id: string, text: string) => {
     await Clipboard.setStringAsync(text);
@@ -118,10 +196,49 @@ export default function RepurposeScreen() {
     setTimeout(() => setCopiedId(null), 1800);
   };
 
+  const selectPlatform = async (id: SuggestedPlatformId) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setActivePlatform(id);
+    setOptimizingPlatform(id);
+    try {
+      const meta = PLATFORMS[id];
+      const rewritten = await callRemix(
+        editedCaption,
+        `Rewrite this caption optimized for ${meta.label}. ${meta.styleHint}. Keep the same core message, voice, and any personal details — just adapt length and tone.`
+      );
+      setEditedCaption(rewritten);
+    } catch {
+      // leave the caption as-is if the rewrite fails
+    } finally {
+      setOptimizingPlatform(null);
+    }
+  };
+
+  const openAndPost = async (id: SuggestedPlatformId) => {
+    const meta = PLATFORMS[id];
+    const handle = settings.handles[id];
+    const url = meta.composeUrl ? meta.composeUrl(editedCaption, handle) : meta.profileUrl(handle);
+
+    // On web, window.open must be called synchronously within the click
+    // handler — calling it after an await gets silently blocked as a popup.
+    if (Platform.OS === "web") {
+      window.open(url, "_blank");
+    }
+
+    await Clipboard.setStringAsync(editedCaption);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+    if (Platform.OS !== "web") {
+      Linking.openURL(url);
+    }
+  };
+
   const topPad = Platform.OS === "web" ? 67 : insets.top;
   const bottomPad = Platform.OS === "web" ? 34 : insets.bottom + 24;
-
   const isDark = colors.background === "#080c14";
+
+  const activeHandle = activePlatform ? settings.handles[activePlatform] : undefined;
+  const previewHandle = activeHandle ? `@${activeHandle}` : "your.handle";
 
   return (
     <View style={[s.root, { backgroundColor: colors.background }]}>
@@ -141,7 +258,7 @@ export default function RepurposeScreen() {
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
           >
-            <Ionicons name="flash" size={16} color="#fff" />
+            <Ionicons name="sparkles" size={16} color="#fff" />
           </LinearGradient>
           <View>
             <Text style={[s.logoName, { color: colors.foreground }]}>
@@ -149,13 +266,16 @@ export default function RepurposeScreen() {
               <Text style={{ color: "#818cf8" }}>.ai</Text>
             </Text>
             <Text style={[s.logoSub, { color: colors.mutedForeground }]}>
-              CONTENT MULTIPLIER
+              AI CREATIVE ASSISTANT
             </Text>
           </View>
           <View
             style={[
               s.badge,
-              { backgroundColor: isDark ? "#0f172a" : "#e8eaf5", borderColor: isDark ? "#1e3a5f" : "#c7d2fe" },
+              {
+                backgroundColor: isDark ? "#0f172a" : "#e8eaf5",
+                borderColor: isDark ? "#1e3a5f" : "#c7d2fe",
+              },
             ]}
           >
             <Text style={[s.badgeText, { color: isDark ? "#60a5fa" : "#6366f1" }]}>
@@ -167,15 +287,35 @@ export default function RepurposeScreen() {
         {/* Headline */}
         <View style={s.headline}>
           <Text style={[s.h1, { color: colors.foreground }]}>
-            One piece of content.{"\n"}Everywhere.
+            Hand us your shot.{"\n"}We'll write the post.
           </Text>
           <Text style={[s.sub, { color: colors.mutedForeground }]}>
-            Paste a transcript, article, or idea — get ready-to-post content for
-            every platform.
+            Upload a photo or video — get a caption, hashtags, and where to
+            post it, instantly.
           </Text>
         </View>
 
-        {/* Input Card */}
+        {/* Voice hint */}
+        <TouchableOpacity
+          onPress={() => router.push("/settings")}
+          style={s.voiceHintRow}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="mic-outline" size={13} color="#818cf8" />
+          <Text style={[s.voiceHintText, { color: colors.mutedForeground }]}>
+            {settings.voice ? (
+              <>
+                Writing in your <Text style={{ color: "#818cf8" }}>{settings.voice}</Text> voice
+              </>
+            ) : (
+              <>
+                <Text style={{ color: "#818cf8" }}>Set your voice</Text> so captions sound like you
+              </>
+            )}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Upload Card */}
         <View
           style={[
             s.card,
@@ -183,295 +323,380 @@ export default function RepurposeScreen() {
           ]}
         >
           <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
-            YOUR RAW CONTENT
+            YOUR PHOTO OR VIDEO
+          </Text>
+
+          {media ? (
+            <View>
+              <View style={s.previewWrap}>
+                <Image
+                  source={{ uri: media.previewUri }}
+                  style={[s.previewImage, { borderColor: colors.border }]}
+                  contentFit="cover"
+                />
+                {media.kind === "video" && (
+                  <View style={s.videoBadge}>
+                    <Ionicons name="videocam" size={12} color="#fff" />
+                    <Text style={s.videoBadgeText}>VIDEO</Text>
+                  </View>
+                )}
+              </View>
+              <TouchableOpacity onPress={pickMedia} style={s.changeLinkRow}>
+                <Ionicons name="swap-horizontal" size={13} color="#818cf8" />
+                <Text style={[s.exampleLink, { color: "#818cf8" }]}>
+                  Choose a different file
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[
+                s.dropZone,
+                {
+                  borderColor: isDark ? "#1e3a5f" : "#c7d2fe",
+                  backgroundColor: isDark ? "#060a10" : "#f8f9ff",
+                },
+              ]}
+              onPress={pickMedia}
+              activeOpacity={0.7}
+              disabled={preparing}
+            >
+              {preparing ? (
+                <>
+                  <ActivityIndicator size="small" color="#818cf8" />
+                  <Text style={[s.dropZoneText, { color: colors.mutedForeground }]}>
+                    Preparing your file...
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Ionicons name="cloud-upload-outline" size={26} color="#818cf8" />
+                  <Text style={[s.dropZoneText, { color: colors.foreground }]}>
+                    Tap to upload a photo or video
+                  </Text>
+                  <Text style={[s.dropZoneHint, { color: colors.mutedForeground }]}>
+                    JPG, PNG, or MP4
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Personal context */}
+        <View
+          style={[
+            s.card,
+            { backgroundColor: colors.card, borderColor: colors.border },
+          ]}
+        >
+          <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
+            ADD ANYTHING PERSONAL ABOUT THIS MOMENT (OPTIONAL)
           </Text>
           <TextInput
+            value={personalContext}
+            onChangeText={setPersonalContext}
+            placeholder="e.g. this was my son's first march"
+            placeholderTextColor={colors.mutedForeground}
             style={[
-              s.textarea,
+              s.contextInput,
               {
                 color: colors.foreground,
                 borderColor: colors.border,
                 backgroundColor: isDark ? "#060a10" : "#f8f9ff",
               },
             ]}
-            value={content}
-            onChangeText={setContent}
-            placeholder="Paste a blog post, video transcript, podcast notes, or any raw idea here..."
-            placeholderTextColor={colors.mutedForeground}
-            multiline
-            numberOfLines={6}
-            textAlignVertical="top"
           />
-          <View style={s.inputFooter}>
-            <Text style={[s.metaText, { color: colors.mutedForeground }]}>
-              {content.length} chars · ~{wordCount} words
-            </Text>
-            <TouchableOpacity onPress={() => setContent(EXAMPLE)}>
-              <Text style={[s.exampleLink, { color: "#818cf8" }]}>
-                Load example
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Format Picker */}
-        <View
-          style={[
-            s.card,
-            { backgroundColor: colors.card, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
-            OUTPUT FORMATS
-          </Text>
-          {FORMATS.map((f) => {
-            const active = selectedFormats.includes(f.id);
-            return (
-              <TouchableOpacity
-                key={f.id}
-                style={[
-                  s.formatRow,
-                  {
-                    backgroundColor: active
-                      ? isDark ? "#0f1e35" : "#eef0ff"
-                      : "transparent",
-                    borderColor: active ? "#3b5bdb" : colors.border,
-                  },
-                ]}
-                onPress={() => toggleFormat(f.id)}
-                activeOpacity={0.7}
-              >
-                <MaterialCommunityIcons
-                  name={f.icon}
-                  size={18}
-                  color={active ? "#818cf8" : colors.mutedForeground}
-                />
-                <View style={s.formatMeta}>
-                  <Text
-                    style={[
-                      s.formatLabel,
-                      {
-                        color: active
-                          ? colors.foreground
-                          : colors.mutedForeground,
-                      },
-                    ]}
-                  >
-                    {f.label}
-                  </Text>
-                  <Text style={[s.formatDesc, { color: colors.mutedForeground }]}>
-                    {f.desc}
-                  </Text>
-                </View>
-                <View
-                  style={[
-                    s.checkbox,
-                    {
-                      backgroundColor: active ? "#6366f1" : "transparent",
-                      borderColor: active ? "#6366f1" : colors.border,
-                    },
-                  ]}
-                >
-                  {active && <Ionicons name="checkmark" size={11} color="#fff" />}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        {/* Tone Picker */}
-        <View
-          style={[
-            s.card,
-            { backgroundColor: colors.card, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
-            TONE OF VOICE
-          </Text>
-          <View style={s.toneRow}>
-            {TONES.map((t) => {
-              const active = tone === t;
-              if (active) {
-                return (
-                  <LinearGradient
-                    key={t}
-                    colors={["#6366f1", "#a855f7"]}
-                    style={s.tonePill}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                  >
-                    <TouchableOpacity
-                      onPress={() => {
-                        setTone(t);
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      }}
-                    >
-                      <Text style={[s.tonePillText, { color: "#fff", fontFamily: "Inter_600SemiBold" }]}>
-                        {t}
-                      </Text>
-                    </TouchableOpacity>
-                  </LinearGradient>
-                );
-              }
-              return (
-                <TouchableOpacity
-                  key={t}
-                  style={[
-                    s.tonePill,
-                    { borderWidth: 1, borderColor: colors.border },
-                  ]}
-                  onPress={() => {
-                    setTone(t);
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[s.tonePillText, { color: colors.mutedForeground }]}>
-                    {t}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
         </View>
 
         {/* Generate Button */}
-        {loading ? (
-          <View
-            style={[
-              s.genBtn,
-              { backgroundColor: isDark ? "#1a2540" : "#e8eaf5" },
-            ]}
-          >
+        {analyzing ? (
+          <View style={[s.genBtn, { backgroundColor: isDark ? "#1a2540" : "#e8eaf5" }]}>
             <ActivityIndicator size="small" color="#818cf8" />
             <Text style={[s.genBtnText, { color: "#818cf8" }]}>
-              Generating...
+              Taking a look at your {media?.kind ?? "file"}...
             </Text>
           </View>
         ) : canGenerate ? (
-          <TouchableOpacity onPress={repurpose} activeOpacity={0.85}>
+          <TouchableOpacity onPress={analyze} activeOpacity={0.85}>
             <LinearGradient
               colors={["#6366f1", "#a855f7"]}
               style={s.genBtn}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 0 }}
             >
-              <Ionicons name="flash" size={18} color="#fff" />
+              <Ionicons name="sparkles" size={18} color="#fff" />
               <Text style={[s.genBtnText, { color: "#fff" }]}>
-                Repurpose Content
+                Analyze &amp; Write Post
               </Text>
             </LinearGradient>
           </TouchableOpacity>
         ) : (
-          <View
-            style={[
-              s.genBtn,
-              { backgroundColor: isDark ? "#1a2540" : "#e8eaf5" },
-            ]}
-          >
-            <Ionicons
-              name="flash"
-              size={18}
-              color={isDark ? "#374151" : "#9ca3af"}
-            />
-            <Text
-              style={[
-                s.genBtnText,
-                { color: isDark ? "#374151" : "#9ca3af" },
-              ]}
-            >
-              Repurpose Content
+          <View style={[s.genBtn, { backgroundColor: isDark ? "#1a2540" : "#e8eaf5" }]}>
+            <Ionicons name="sparkles" size={18} color={isDark ? "#374151" : "#9ca3af"} />
+            <Text style={[s.genBtnText, { color: isDark ? "#374151" : "#9ca3af" }]}>
+              Analyze &amp; Write Post
             </Text>
           </View>
         )}
 
         {/* Error */}
         {!!error && (
-          <View
-            style={[
-              s.errorBox,
-              { backgroundColor: "#1a0a0a", borderColor: "#7f1d1d" },
-            ]}
-          >
+          <View style={[s.errorBox, { backgroundColor: "#1a0a0a", borderColor: "#7f1d1d" }]}>
             <Ionicons name="alert-circle-outline" size={15} color="#fca5a5" />
             <Text style={[s.errorText, { color: "#fca5a5" }]}>{error}</Text>
           </View>
         )}
 
         {/* Results */}
-        {results && (
+        {result && media && (
           <View style={s.results}>
-            <View
-              style={[s.resultsDivider, { borderBottomColor: colors.border }]}
-            >
+            <View style={[s.resultsDivider, { borderBottomColor: colors.border }]}>
               <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
-                GENERATED — {tone.toUpperCase()} TONE
+                YOUR AI FRIEND SAYS
               </Text>
             </View>
 
-            {selectedFormats.map((id) => {
-              const f = FORMATS.find((fmt) => fmt.id === id);
-              const text = results[id];
-              if (!f || !text) return null;
-              const isCopied = copiedId === id;
-              return (
-                <View
-                  key={id}
+            {/* What we see */}
+            <View
+              style={[
+                s.resultCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <View style={s.resultTitle}>
+                <Ionicons name="eye-outline" size={15} color="#818cf8" />
+                <Text style={[s.resultLabel, { color: isDark ? "#c7d2fe" : "#6366f1" }]}>
+                  What We See
+                </Text>
+              </View>
+              <View style={[s.resultBody, { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe", marginTop: 14 }]}>
+                <Text
                   style={[
-                    s.resultCard,
-                    {
-                      backgroundColor: colors.card,
-                      borderColor: colors.border,
-                    },
+                    s.resultText,
+                    { color: isDark ? "#d1d5db" : "#374151", fontStyle: "italic" },
                   ]}
                 >
-                  <View style={s.resultHeader}>
-                    <View style={s.resultTitle}>
-                      <MaterialCommunityIcons
-                        name={f.icon}
-                        size={15}
-                        color="#818cf8"
-                      />
-                      <Text style={[s.resultLabel, { color: isDark ? "#c7d2fe" : "#6366f1" }]}>
-                        {f.label}
-                      </Text>
-                    </View>
-                    <TouchableOpacity
-                      style={[
-                        s.copyBtn,
-                        {
-                          backgroundColor: isCopied ? "#22c55e" : "transparent",
-                          borderColor: isCopied ? "#22c55e" : colors.border,
-                        },
-                      ]}
-                      onPress={() => copyText(id, text)}
-                    >
-                      <Text
-                        style={[
-                          s.copyBtnText,
-                          {
-                            color: isCopied ? "#fff" : colors.mutedForeground,
-                          },
-                        ]}
-                      >
-                        {isCopied ? "COPIED" : "COPY"}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                  <View
+                  {result.summary}
+                </Text>
+              </View>
+            </View>
+
+            {/* Policy warnings */}
+            <PolicyWarnings flags={policyFlags} />
+
+            {/* Caption */}
+            <View
+              style={[
+                s.resultCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <View style={s.resultTitle}>
+                <Ionicons name="chatbox-ellipses-outline" size={15} color="#818cf8" />
+                <Text style={[s.resultLabel, { color: isDark ? "#c7d2fe" : "#6366f1" }]}>
+                  Caption
+                </Text>
+              </View>
+              <View style={[s.resultBody, { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe", marginTop: 14, marginBottom: 16 }]}>
+                <RemixableField
+                  value={editedCaption}
+                  onChange={setEditedCaption}
+                  onRemix={(instruction) => callRemix(editedCaption, instruction)}
+                  placeholder="Your caption..."
+                />
+              </View>
+              <TouchableOpacity
+                onPress={() => copyText("caption", editedCaption)}
+                activeOpacity={0.85}
+              >
+                <LinearGradient
+                  colors={
+                    copiedId === "caption"
+                      ? ["#22c55e", "#22c55e"]
+                      : ["#6366f1", "#a855f7"]
+                  }
+                  style={s.copyCaptionBtn}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                >
+                  <Ionicons
+                    name={copiedId === "caption" ? "checkmark" : "copy-outline"}
+                    size={16}
+                    color="#fff"
+                  />
+                  <Text style={s.copyCaptionBtnText}>
+                    {copiedId === "caption" ? "Copied Caption" : "Copy Caption"}
+                  </Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+
+            {/* Hashtags */}
+            <View
+              style={[
+                s.resultCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <View style={s.resultHeader}>
+                <View style={s.resultTitle}>
+                  <Ionicons name="pricetags-outline" size={15} color="#818cf8" />
+                  <Text style={[s.resultLabel, { color: isDark ? "#c7d2fe" : "#6366f1" }]}>
+                    Hashtags
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={[
+                    s.copyBtn,
+                    {
+                      backgroundColor: copiedId === "hashtags" ? "#22c55e" : "transparent",
+                      borderColor: copiedId === "hashtags" ? "#22c55e" : colors.border,
+                    },
+                  ]}
+                  onPress={() => copyText("hashtags", editedHashtags)}
+                >
+                  <Text
                     style={[
-                      s.resultBody,
-                      { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe" },
+                      s.copyBtnText,
+                      { color: copiedId === "hashtags" ? "#fff" : colors.mutedForeground },
                     ]}
                   >
-                    <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151" }]}>
-                      {text}
-                    </Text>
-                  </View>
-                </View>
-              );
-            })}
+                    {copiedId === "hashtags" ? "COPIED" : "COPY"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <TextInput
+                value={editedHashtags}
+                onChangeText={setEditedHashtags}
+                multiline
+                placeholder="#yourtags"
+                placeholderTextColor={colors.mutedForeground}
+                style={[s.hashtagInput, { color: "#818cf8" }]}
+              />
+            </View>
+
+            {/* Platforms */}
+            <View
+              style={[
+                s.resultCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <View style={s.resultTitle}>
+                <Ionicons name="share-social-outline" size={15} color="#818cf8" />
+                <Text style={[s.resultLabel, { color: isDark ? "#c7d2fe" : "#6366f1" }]}>
+                  Where To Post
+                </Text>
+              </View>
+              <Text style={[s.platformHint, { color: colors.mutedForeground }]}>
+                Tap a platform to rewrite your caption for it
+              </Text>
+              <View style={{ marginTop: 10, gap: 8 }}>
+                {result.platforms.map((p) => {
+                  const active = activePlatform === p.id;
+                  const optimizing = optimizingPlatform === p.id;
+                  return (
+                    <View key={p.id}>
+                      <TouchableOpacity
+                        style={[
+                          s.formatRow,
+                          {
+                            backgroundColor: active
+                              ? isDark
+                                ? "#0f1e35"
+                                : "#eef0ff"
+                              : "transparent",
+                            borderColor: active ? "#3b5bdb" : colors.border,
+                          },
+                        ]}
+                        onPress={() => selectPlatform(p.id)}
+                        activeOpacity={0.7}
+                      >
+                        {optimizing ? (
+                          <ActivityIndicator size="small" color="#818cf8" />
+                        ) : (
+                          <MaterialCommunityIcons
+                            name={PLATFORMS[p.id].icon as never}
+                            size={18}
+                            color="#818cf8"
+                          />
+                        )}
+                        <View style={s.formatMeta}>
+                          <Text style={[s.formatLabel, { color: colors.foreground }]}>
+                            {p.label}
+                          </Text>
+                          <Text style={[s.formatDesc, { color: colors.mutedForeground }]}>
+                            {p.reason}
+                          </Text>
+                        </View>
+                        {active && !optimizing && (
+                          <Ionicons name="checkmark-circle" size={18} color="#818cf8" />
+                        )}
+                      </TouchableOpacity>
+                      {active && (
+                        <TouchableOpacity
+                          onPress={() => openAndPost(p.id)}
+                          style={s.openPostBtn}
+                          activeOpacity={0.85}
+                        >
+                          <Ionicons name="open-outline" size={14} color="#818cf8" />
+                          <Text style={[s.openPostBtnText, { color: "#818cf8" }]}>
+                            Open {p.label} &amp; Post
+                            {settings.handles[p.id] ? ` (@${settings.handles[p.id]})` : ""}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* Preview */}
+            <View style={[s.resultsDivider, { borderBottomColor: colors.border }]}>
+              <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
+                POST PREVIEW
+              </Text>
+            </View>
+            <View
+              style={[
+                s.previewCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <View style={s.previewHeaderRow}>
+                <LinearGradient
+                  colors={["#6366f1", "#a855f7"]}
+                  style={s.previewAvatar}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                />
+                <Text style={[s.previewHandle, { color: colors.foreground }]}>
+                  {previewHandle}
+                </Text>
+                <Ionicons
+                  name="ellipsis-horizontal"
+                  size={16}
+                  color={colors.mutedForeground}
+                  style={{ marginLeft: "auto" }}
+                />
+              </View>
+              <Image
+                source={{ uri: media.previewUri }}
+                style={s.previewPostImage}
+                contentFit="cover"
+              />
+              <View style={s.previewCaptionArea}>
+                <Text style={[s.previewCaptionText, { color: colors.foreground }]}>
+                  <Text style={{ fontFamily: "Inter_700Bold" }}>{previewHandle} </Text>
+                  {editedCaption}
+                </Text>
+                <Text style={[s.previewHashtagText, { color: "#818cf8" }]}>
+                  {editedHashtags}
+                </Text>
+              </View>
+            </View>
           </View>
         )}
       </ScrollView>
@@ -486,7 +711,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginBottom: 28,
+    marginBottom: 20,
   },
   logoGrad: {
     width: 34,
@@ -519,7 +744,7 @@ const s = StyleSheet.create({
     letterSpacing: 0.5,
     fontFamily: "Inter_600SemiBold",
   },
-  headline: { marginBottom: 24 },
+  headline: { marginBottom: 16 },
   h1: {
     fontSize: 28,
     fontWeight: "800",
@@ -529,6 +754,13 @@ const s = StyleSheet.create({
     fontFamily: "Inter_700Bold",
   },
   sub: { fontSize: 14, lineHeight: 20, fontFamily: "Inter_400Regular" },
+  voiceHintRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 16,
+  },
+  voiceHintText: { fontSize: 12, fontFamily: "Inter_500Medium" },
   card: { borderWidth: 1, borderRadius: 16, padding: 18, marginBottom: 14 },
   cardLabel: {
     fontSize: 9,
@@ -536,22 +768,62 @@ const s = StyleSheet.create({
     marginBottom: 14,
     fontFamily: "Inter_600SemiBold",
   },
-  textarea: {
+  contextInput: {
     borderWidth: 1,
     borderRadius: 10,
-    padding: 14,
-    fontSize: 14,
-    minHeight: 130,
-    lineHeight: 22,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 13.5,
     fontFamily: "Inter_400Regular",
   },
-  inputFooter: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+  dropZone: {
+    borderWidth: 1.5,
+    borderStyle: "dashed",
+    borderRadius: 12,
+    paddingVertical: 34,
     alignItems: "center",
-    marginTop: 8,
+    justifyContent: "center",
+    gap: 6,
   },
-  metaText: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  dropZoneText: {
+    fontSize: 13.5,
+    fontWeight: "600",
+    fontFamily: "Inter_600SemiBold",
+    marginTop: 4,
+  },
+  dropZoneHint: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  previewWrap: { position: "relative" },
+  previewImage: {
+    width: "100%",
+    aspectRatio: 1,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  videoBadge: {
+    position: "absolute",
+    top: 10,
+    left: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 20,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  videoBadgeText: {
+    color: "#fff",
+    fontSize: 9,
+    letterSpacing: 0.8,
+    fontFamily: "Inter_600SemiBold",
+  },
+  changeLinkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 10,
+    alignSelf: "flex-start",
+  },
   exampleLink: { fontSize: 11, fontFamily: "Inter_500Medium" },
   formatRow: {
     flexDirection: "row",
@@ -560,7 +832,6 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 10,
     padding: 10,
-    marginBottom: 8,
   },
   formatMeta: { flex: 1 },
   formatLabel: {
@@ -569,17 +840,16 @@ const s = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
   },
   formatDesc: { fontSize: 10, marginTop: 2, fontFamily: "Inter_400Regular" },
-  checkbox: {
-    width: 17,
-    height: 17,
-    borderRadius: 4,
-    borderWidth: 1,
+  platformHint: { fontSize: 10.5, fontFamily: "Inter_400Regular", marginTop: -6 },
+  openPostBtn: {
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
+    gap: 6,
+    marginTop: 6,
+    marginLeft: 4,
+    alignSelf: "flex-start",
   },
-  toneRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  tonePill: { paddingHorizontal: 15, paddingVertical: 7, borderRadius: 20 },
-  tonePillText: { fontSize: 13, fontFamily: "Inter_500Medium" },
+  openPostBtnText: { fontSize: 11.5, fontFamily: "Inter_600SemiBold" },
   genBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -617,7 +887,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 14,
+    marginBottom: 4,
   },
   resultTitle: { flexDirection: "row", alignItems: "center", gap: 7 },
   resultLabel: {
@@ -637,10 +907,62 @@ const s = StyleSheet.create({
     letterSpacing: 1,
     fontFamily: "Inter_600SemiBold",
   },
+  copyCaptionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 12,
+    paddingVertical: 14,
+  },
+  copyCaptionBtnText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+  },
   resultBody: { borderLeftWidth: 2, paddingLeft: 14 },
   resultText: {
     fontSize: 13.5,
     lineHeight: 22,
     fontFamily: "Inter_400Regular",
+  },
+  hashtagInput: {
+    marginTop: 12,
+    fontSize: 12.5,
+    lineHeight: 20,
+    fontFamily: "Inter_500Medium",
+    padding: 0,
+  },
+  previewCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    overflow: "hidden",
+    marginBottom: 12,
+  },
+  previewHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  previewAvatar: { width: 28, height: 28, borderRadius: 14 },
+  previewHandle: {
+    fontSize: 13,
+    fontWeight: "700",
+    fontFamily: "Inter_700Bold",
+  },
+  previewPostImage: { width: "100%", aspectRatio: 1 },
+  previewCaptionArea: { padding: 14, gap: 8 },
+  previewCaptionText: {
+    fontSize: 13,
+    lineHeight: 20,
+    fontFamily: "Inter_400Regular",
+  },
+  previewHashtagText: {
+    fontSize: 12.5,
+    lineHeight: 19,
+    fontFamily: "Inter_500Medium",
   },
 });

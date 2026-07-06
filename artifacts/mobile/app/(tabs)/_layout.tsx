@@ -20,6 +20,15 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="index"
         options={{
+          title: "Create",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="sparkles" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="repurpose"
+        options={{
           title: "Repurpose",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="flash" size={size} color={color} />
@@ -32,6 +41,15 @@ export default function TabsLayout() {
           title: "Scripts",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="film" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: "Settings",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="settings-sharp" size={size} color={color} />
           ),
         }}
       />

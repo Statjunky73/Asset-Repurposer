@@ -14,7 +14,10 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { RemixableField } from "@/components/RemixableField";
 import { useColors } from "@/hooks/useColors";
+import { apiUrl } from "@/lib/apiBase";
+import { callRemix } from "@/lib/remix";
 
 type ScriptScene = {
   order: number;
@@ -68,9 +71,15 @@ function formatTimestamp(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function buildFullScriptText(result: VideoScriptResult) {
+function buildFullScriptText(input: {
+  hook: string;
+  scenes: ScriptScene[];
+  caption: string;
+  hashtags: string;
+  cta: string;
+}) {
   let elapsed = 0;
-  const sceneLines = result.scenes
+  const sceneLines = input.scenes
     .map((scene) => {
       const start = elapsed;
       elapsed += scene.durationSeconds;
@@ -85,11 +94,11 @@ function buildFullScriptText(result: VideoScriptResult) {
     .join("\n\n");
 
   return [
-    `HOOK: ${result.hook}`,
+    `HOOK: ${input.hook}`,
     sceneLines,
-    `CAPTION:\n${result.caption}`,
-    `HASHTAGS: ${result.hashtags.map((h) => `#${h}`).join(" ")}`,
-    `CTA: ${result.cta}`,
+    `CAPTION:\n${input.caption}`,
+    `HASHTAGS: ${input.hashtags}`,
+    `CTA: ${input.cta}`,
   ].join("\n\n");
 }
 
@@ -108,6 +117,12 @@ export default function VideoScriptScreen() {
   const [error, setError] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  const [editedHook, setEditedHook] = useState("");
+  const [editedScenes, setEditedScenes] = useState<ScriptScene[]>([]);
+  const [editedCaption, setEditedCaption] = useState("");
+  const [editedHashtags, setEditedHashtags] = useState("");
+  const [editedCta, setEditedCta] = useState("");
+
   const canGenerate =
     !loading && idea.trim().length > 0 && selectedPlatforms.length > 0;
 
@@ -125,8 +140,7 @@ export default function VideoScriptScreen() {
     setError("");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
-      const domain = process.env.EXPO_PUBLIC_DOMAIN;
-      const res = await fetch(`https://${domain}/api/video-script`, {
+      const res = await fetch(apiUrl("/api/video-script"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -139,6 +153,11 @@ export default function VideoScriptScreen() {
       if (!res.ok) throw new Error("Server error");
       const data = await res.json();
       setResult(data.result);
+      setEditedHook(data.result.hook);
+      setEditedScenes(data.result.scenes.map((sc: ScriptScene) => ({ ...sc })));
+      setEditedCaption(data.result.caption);
+      setEditedHashtags(data.result.hashtags.map((h: string) => `#${h}`).join(" "));
+      setEditedCta(data.result.cta);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch {
       setError("Something went wrong. Please try again.");
@@ -159,8 +178,13 @@ export default function VideoScriptScreen() {
     if (!result) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const nextAlternatives = [...result.hookAlternatives];
-    nextAlternatives[index] = result.hook;
-    setResult({ ...result, hook: alt, hookAlternatives: nextAlternatives });
+    nextAlternatives[index] = editedHook;
+    setResult({ ...result, hookAlternatives: nextAlternatives });
+    setEditedHook(alt);
+  };
+
+  const updateScene = (index: number, patch: Partial<ScriptScene>) => {
+    setEditedScenes((prev) => prev.map((sc, i) => (i === index ? { ...sc, ...patch } : sc)));
   };
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
@@ -508,7 +532,7 @@ export default function VideoScriptScreen() {
                       borderColor: copiedId === "hook" ? "#22c55e" : colors.border,
                     },
                   ]}
-                  onPress={() => copyText("hook", result.hook)}
+                  onPress={() => copyText("hook", editedHook)}
                 >
                   <Text
                     style={[
@@ -521,9 +545,13 @@ export default function VideoScriptScreen() {
                 </TouchableOpacity>
               </View>
               <View style={[s.resultBody, { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe" }]}>
-                <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151", fontWeight: "700" }]}>
-                  {result.hook}
-                </Text>
+                <RemixableField
+                  value={editedHook}
+                  onChange={setEditedHook}
+                  onRemix={(instruction) => callRemix(editedHook, instruction)}
+                  textStyle={{ fontWeight: "700" }}
+                  placeholder="Your hook..."
+                />
               </View>
               {result.hookAlternatives.map((alt, index) => (
                 <TouchableOpacity
@@ -539,7 +567,7 @@ export default function VideoScriptScreen() {
             </View>
 
             {/* Scenes */}
-            {result.scenes.map((scene) => {
+            {editedScenes.map((scene, index) => {
               const start = elapsed;
               elapsed += scene.durationSeconds;
               const sceneId = `scene-${scene.order}`;
@@ -589,24 +617,40 @@ export default function VideoScriptScreen() {
                   <View style={[s.resultBody, { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe" }]}>
                     <View style={s.sceneRow}>
                       <MaterialCommunityIcons name="movie-outline" size={14} color={colors.mutedForeground} />
-                      <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151" }]}>
-                        {scene.visual}
-                      </Text>
+                      <TextInput
+                        value={scene.visual}
+                        onChangeText={(v) => updateScene(index, { visual: v })}
+                        multiline
+                        style={[s.resultText, s.sceneInput, { color: isDark ? "#d1d5db" : "#374151" }]}
+                      />
                     </View>
                     <View style={s.sceneRow}>
                       <MaterialCommunityIcons name="microphone-outline" size={14} color={colors.mutedForeground} />
-                      <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151" }]}>
-                        {scene.voiceover}
-                      </Text>
+                      <TextInput
+                        value={scene.voiceover}
+                        onChangeText={(v) => updateScene(index, { voiceover: v })}
+                        multiline
+                        style={[s.resultText, s.sceneInput, { color: isDark ? "#d1d5db" : "#374151" }]}
+                      />
                     </View>
-                    {!!scene.onScreenText && (
-                      <View style={s.sceneRow}>
-                        <MaterialCommunityIcons name="format-text" size={14} color={colors.mutedForeground} />
-                        <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151" }]}>
-                          {scene.onScreenText}
-                        </Text>
-                      </View>
-                    )}
+                    <View style={s.sceneRow}>
+                      <MaterialCommunityIcons name="format-text" size={14} color={colors.mutedForeground} />
+                      <TextInput
+                        value={scene.onScreenText}
+                        onChangeText={(v) => updateScene(index, { onScreenText: v })}
+                        placeholder="On-screen text (optional)"
+                        placeholderTextColor={colors.mutedForeground}
+                        multiline
+                        style={[s.resultText, s.sceneInput, { color: isDark ? "#d1d5db" : "#374151" }]}
+                      />
+                    </View>
+                    <RemixableField
+                      value={scene.voiceover}
+                      onChange={(v) => updateScene(index, { voiceover: v })}
+                      onRemix={(instruction) => callRemix(scene.voiceover, instruction)}
+                      remixLabel="Remix scene"
+                      hideInput
+                    />
                   </View>
                 </View>
               );
@@ -629,12 +673,7 @@ export default function VideoScriptScreen() {
                       borderColor: copiedId === "caption" ? "#22c55e" : colors.border,
                     },
                   ]}
-                  onPress={() =>
-                    copyText(
-                      "caption",
-                      `${result.caption}\n\n${result.hashtags.map((h) => `#${h}`).join(" ")}`
-                    )
-                  }
+                  onPress={() => copyText("caption", `${editedCaption}\n\n${editedHashtags}`)}
                 >
                   <Text
                     style={[
@@ -647,12 +686,20 @@ export default function VideoScriptScreen() {
                 </TouchableOpacity>
               </View>
               <View style={[s.resultBody, { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe" }]}>
-                <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151" }]}>
-                  {result.caption}
-                </Text>
-                <Text style={[s.hashtagText, { color: "#818cf8" }]}>
-                  {result.hashtags.map((h) => `#${h}`).join("  ")}
-                </Text>
+                <RemixableField
+                  value={editedCaption}
+                  onChange={setEditedCaption}
+                  onRemix={(instruction) => callRemix(editedCaption, instruction)}
+                  placeholder="Your caption..."
+                />
+                <TextInput
+                  value={editedHashtags}
+                  onChangeText={setEditedHashtags}
+                  multiline
+                  placeholder="#yourtags"
+                  placeholderTextColor={colors.mutedForeground}
+                  style={[s.hashtagText, { color: "#818cf8", padding: 0 }]}
+                />
               </View>
             </View>
 
@@ -665,15 +712,29 @@ export default function VideoScriptScreen() {
                 </Text>
               </View>
               <View style={[s.resultBody, { borderLeftColor: isDark ? "#1e3a5f" : "#c7d2fe", marginTop: 14 }]}>
-                <Text style={[s.resultText, { color: isDark ? "#d1d5db" : "#374151" }]}>
-                  {result.cta}
-                </Text>
+                <RemixableField
+                  value={editedCta}
+                  onChange={setEditedCta}
+                  onRemix={(instruction) => callRemix(editedCta, instruction)}
+                  placeholder="Your closing line..."
+                />
               </View>
             </View>
 
             {/* Copy Full Script */}
             <TouchableOpacity
-              onPress={() => copyText("full", buildFullScriptText(result))}
+              onPress={() =>
+                copyText(
+                  "full",
+                  buildFullScriptText({
+                    hook: editedHook,
+                    scenes: editedScenes,
+                    caption: editedCaption,
+                    hashtags: editedHashtags,
+                    cta: editedCta,
+                  })
+                )
+              }
               activeOpacity={0.85}
             >
               <View
@@ -878,6 +939,7 @@ const s = StyleSheet.create({
     fontFamily: "Inter_400Regular",
   },
   sceneRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  sceneInput: { flex: 1, padding: 0 },
   hashtagText: {
     fontSize: 12.5,
     lineHeight: 20,
