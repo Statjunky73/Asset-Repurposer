@@ -38,6 +38,15 @@ export default function SettingsScreen() {
     update({ ...settings, handles: { ...settings.handles, [id]: value } });
   };
 
+  const toggleDefaultPlatform = (id: keyof typeof PLATFORMS) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    update({
+      ...settings,
+      defaultPlatforms: { ...settings.defaultPlatforms, [id]: !settings.defaultPlatforms[id] },
+    });
+    flashSaved();
+  };
+
   const topPad = Platform.OS === "web" ? 67 : insets.top;
   const bottomPad = Platform.OS === "web" ? 34 : insets.bottom + 24;
   const isDark = colors.background === "#080c14";
@@ -124,15 +133,38 @@ export default function SettingsScreen() {
         {/* Handles Card */}
         <View style={[s.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>YOUR HANDLES</Text>
+          <Text style={[s.handlesHint, { color: colors.mutedForeground }]}>
+            Toggle "Use by default" for platforms you post to regularly — they'll
+            already be checked in "Where To Post" on every new post.
+          </Text>
           {HANDLE_PLATFORM_IDS.map((id) => {
             const meta = PLATFORMS[id];
+            const isDefault = !!settings.defaultPlatforms[id];
             return (
-              <View
-                key={id}
-                style={[s.handleRow, { borderColor: colors.border }]}
-              >
-                <MaterialCommunityIcons name={meta.icon as never} size={18} color="#818cf8" />
-                <Text style={[s.handleLabel, { color: colors.foreground }]}>{meta.label}</Text>
+              <View key={id} style={[s.handleRow, { borderColor: colors.border }]}>
+                <View style={s.handleTopRow}>
+                  <MaterialCommunityIcons name={meta.icon as never} size={18} color="#818cf8" />
+                  <Text style={[s.handleLabel, { color: colors.foreground }]}>{meta.label}</Text>
+                  <TouchableOpacity
+                    style={s.defaultToggle}
+                    onPress={() => toggleDefaultPlatform(id)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name={isDefault ? "checkbox" : "square-outline"}
+                      size={16}
+                      color={isDefault ? "#818cf8" : colors.mutedForeground}
+                    />
+                    <Text
+                      style={[
+                        s.defaultToggleText,
+                        { color: isDefault ? "#818cf8" : colors.mutedForeground },
+                      ]}
+                    >
+                      Use by default
+                    </Text>
+                  </TouchableOpacity>
+                </View>
                 <TextInput
                   value={settings.handles[id] ?? ""}
                   onChangeText={(v) => setHandle(id, v)}
@@ -191,16 +223,34 @@ const s = StyleSheet.create({
   voiceWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   voicePill: { paddingHorizontal: 15, paddingVertical: 9, borderRadius: 20 },
   voicePillText: { fontSize: 13, fontFamily: "Inter_500Medium" },
+  handlesHint: {
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: -8,
+    marginBottom: 14,
+    fontFamily: "Inter_400Regular",
+  },
   handleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
     paddingVertical: 10,
     borderBottomWidth: 1,
   },
-  handleLabel: { width: 84, fontSize: 12.5, fontFamily: "Inter_600SemiBold" },
+  handleTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8,
+  },
+  handleLabel: { flex: 1, fontSize: 12.5, fontFamily: "Inter_600SemiBold" },
+  defaultToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  defaultToggleText: {
+    fontSize: 10.5,
+    fontFamily: "Inter_500Medium",
+  },
   handleInput: {
-    flex: 1,
     borderWidth: 1,
     borderRadius: 8,
     paddingHorizontal: 10,

@@ -26,6 +26,7 @@ export type HandlePlatformId =
 export type Settings = {
   voice: VoiceOption | null;
   handles: Partial<Record<HandlePlatformId, string>>;
+  defaultPlatforms: Partial<Record<HandlePlatformId, boolean>>;
 };
 
 const STORAGE_KEY = "imagine.settings.v1";
@@ -33,6 +34,7 @@ const STORAGE_KEY = "imagine.settings.v1";
 export const DEFAULT_SETTINGS: Settings = {
   voice: null,
   handles: {},
+  defaultPlatforms: {},
 };
 
 export async function loadSettings(): Promise<Settings> {
@@ -43,6 +45,7 @@ export async function loadSettings(): Promise<Settings> {
     return {
       voice: parsed.voice ?? null,
       handles: parsed.handles ?? {},
+      defaultPlatforms: parsed.defaultPlatforms ?? {},
     };
   } catch {
     return DEFAULT_SETTINGS;

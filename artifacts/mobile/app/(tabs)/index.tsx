@@ -228,6 +228,7 @@ export default function CreateScreen() {
       setEditedCaption(data.result.caption);
       setEditedHashtags(data.result.hashtags.map((h: string) => `#${h}`).join(" "));
       setPolicyFlags(data.policyFlags ?? []);
+      setSelectedPlatforms(ALL_PLATFORM_IDS.filter((id) => settings.defaultPlatforms[id]));
       lastCheckedCaptionRef.current = data.result.caption;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch {
@@ -328,6 +329,8 @@ export default function CreateScreen() {
     selectedPlatforms.find((id) => settings.handles[id]) ?? selectedPlatforms[0];
   const previewHandleRaw = previewPlatformId ? settings.handles[previewPlatformId] : undefined;
   const previewHandle = previewHandleRaw ? `@${previewHandleRaw}` : "your.handle";
+
+  const hasDefaultPlatforms = ALL_PLATFORM_IDS.some((id) => settings.defaultPlatforms[id]);
 
   const orderedPlatformIds: PlatformId[] = result
     ? [
@@ -721,9 +724,9 @@ export default function CreateScreen() {
                 </Text>
               </View>
               <Text style={[s.platformHint, { color: colors.mutedForeground }]}>
-                Check every platform you're planning to post to — AI PICK marks
-                what we think fits best. Tap the wand to optimize your caption
-                for any of them.
+                {hasDefaultPlatforms
+                  ? "Your regular platforms are already checked below — AI PICK marks what we think fits best. Uncheck or add any you'd like, and tap the wand to optimize your caption for a specific one."
+                  : "Check every platform you're planning to post to — AI PICK marks what we think fits best. Tap the wand to optimize your caption for any of them."}
               </Text>
               <View style={{ marginTop: 10, gap: 8 }}>
                 {orderedPlatformIds.map((id) => {
