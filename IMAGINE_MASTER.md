@@ -6,8 +6,10 @@ document should let you understand the whole project and continue without
 re-deriving context from git history or asking the user to re-explain
 things.
 
-Last updated: 2026-07-06 (end of session that added editable output/Remix,
-policy flagging, voice settings, and profile/platform settings).
+Last updated: 2026-07-06 (end of session that added multi-photo carousel
+post creation, on top of the earlier session that added editable
+output/Remix, policy flagging, voice settings, and profile/platform
+settings).
 
 ---
 
@@ -127,16 +129,82 @@ Set a voice once, Imagine always writes in that style; optional per-post persona
 - Backend prompt in `media.ts` was rewritten with an explicit bad/good example pair (mirroring the user's own examples) to force short, conversational, "texting a friend" captions **by default**, regardless of which voice is chosen, with per-voice style guidance layered on top.
 - **Status: done, verified live.** Test case: voice = "Funny & Light", personal context = "this is our team mascot logo, we just redesigned it" on a lightning-bolt logo image produced: *"We finally redesigned our mascot and honestly? She goes hard. The old one had a good run but this thing is built different. ⚡"*
 
-### 3.7 Feature: Profile & platform settings (this session)
+### 3.7 Feature: Profile & platform settings (this session, redesigned in a later session — see below)
 
-Store your handles once; tap a suggested platform to get the caption rewritten for that platform's style; one-tap "Open & Post."
+Store your handles once; check off every platform you intend to post to (not just the AI's top picks); optionally optimize the caption per platform; one-tap "Open & Post" per selected platform.
 
 - `artifacts/mobile/lib/settings.ts` — `HandlePlatformId`: 11 platforms (the 10 from §3.5 plus `substack`). Handles stored as `Partial<Record<HandlePlatformId, string>>`, persisted via AsyncStorage.
 - `artifacts/mobile/hooks/useSettings.ts` — hook wrapping load/save, using `useFocusEffect` (re-exported by `expo-router`, no phantom-dependency issue) so settings reload every time a tab regains focus — this is how a handle saved in Settings shows up immediately back on the Create tab without a full app reload.
 - `artifacts/mobile/app/(tabs)/settings.tsx` — new screen: voice picker (§3.6) + 11 handle inputs, auto-save per field with a "Saved" flash confirmation. No separate save button — low-friction, matches "remembers forever" simplicity.
 - `artifacts/mobile/lib/platforms.ts` — per-platform metadata: icon (MaterialCommunityIcons name), a `styleHint` string (used to build the "optimize for this platform" Remix instruction), `profileUrl(handle)` builder, and — only for **X and Reddit** — a real `composeUrl(caption, handle)` with the caption pre-filled via query param, since those are the only two platforms whose web intent URLs genuinely support text prefill without needing API approval. Every other platform falls back to profile/home URL + clipboard copy.
-- On the Create screen: tapping a suggested platform highlights it, calls `/api/remix` with an instruction built from that platform's `styleHint`, replaces the caption with the rewritten version, and reveals an "Open {Platform} & Post" button. The Post Preview's handle shows the real `@handle` once a platform with a saved handle is selected (falls back to the "your.handle" placeholder otherwise).
+- **Redesigned (later session):** originally, tapping a suggested platform both *selected* it and *immediately triggered* an AI rewrite of the caption in the same action — see the bug this caused in §5. The "Where To Post" card now renders all 10 platforms (`ALL_PLATFORM_IDS` = `HANDLE_PLATFORM_IDS` minus `substack`) as a checkbox list, AI-suggested ones marked with an "AI PICK" badge and their reason text, ordered suggested-first. **Selecting a platform (the checkbox) is now a pure state toggle — it never touches the caption.** Each checked platform separately reveals an explicit "Optimize for {Platform}" action (still calls `/api/remix` with that platform's `styleHint`, same as before, just no longer auto-fired by selection) and its own "Open {Platform} & Post" button, so multiple platforms can be selected and posted to independently. The Post Preview's handle now picks the first *selected* platform that has a saved handle (falls back to "your.handle" if none do).
 - **Status: done, verified live**, including a real bug fix — see §5.
+
+### 3.8 Feature: Multi-photo carousel post creation (this session)
+
+The Create screen now supports picking 2-10 photos at once and getting back
+one cohesive caption/hashtag/platform analysis for the whole set — a real
+Instagram/Facebook/LinkedIn-style carousel post, not a single photo.
+
+- Backend: `artifacts/api-server/src/routes/media.ts` — `POST
+  /api/analyze-media`'s request shape changed from a single `imageBase64` /
+  `mimeType` pair to an `images: { imageBase64, mimeType }[]` array (1-10
+  entries). Every entry becomes its own `{type:"image"}` content block in the
+  same Claude message (the vision API natively supports multiple images per
+  message — no new API surface needed there).
+  - `buildPrompt` now takes `imageCount` and, when `mediaType === "photo" &&
+    imageCount > 1`, injects a carousel-specific instruction: write **one**
+    caption for the whole set as a single story (not per-photo), treat photo
+    order as intentional (first = cover slide), and the `summary` field
+    describes the set as a whole.
+  - `contentCategories` classification is asked to flag a category if it
+    appears in **any** photo in the set, not just the first.
+- Frontend: `artifacts/mobile/app/(tabs)/index.tsx` — media state changed
+  from a single nullable object to a `MediaItem[]` array.
+  - Empty-state dropzone now uses `allowsMultipleSelection: true,
+    selectionLimit: 10`. If more than one asset comes back, any videos in the
+    selection are filtered out (carousels are **photos-only** by design — see
+    below) with a friendly inline note if anything was dropped.
+  - Once photos are selected, they render as a horizontal thumbnail strip,
+    each with a small × remove button, plus a trailing "+" tile (shown only
+    when the existing media is photos and there are fewer than 10) that opens
+    a single-select, images-only picker to append one more.
+  - "Start over with a different file" replaces the old "Choose a different
+    file" link and re-opens the full multi-select picker from scratch.
+  - The `analyze()` call now sends `images: media.map(m => ({ imageBase64,
+    mimeType }))` and `mediaType: media[0].kind`.
+- New component: `artifacts/mobile/components/CarouselPreview.tsx` — a
+  swipeable, paginated image carousel (horizontal `ScrollView` with
+  `pagingEnabled`) with dot page indicators, used in the Post Preview card.
+  Renders identically to a single static image when there's only one photo
+  (no dots shown), so the single-photo/video path is visually unchanged.
+- **Scope decisions (confirmed with the user before building):**
+  - **Photos only** — video stays exactly as it was, a single video with one
+    extracted frame, never mixed into a carousel.
+  - **No drag-to-reorder** — slide order is pick order; remove-and-re-add is
+    the only way to change composition.
+  - **Cap at 10 slides**, matching Instagram's real limit.
+- Everything downstream of analysis (Remix, policy flags, platform
+  suggestions, Open & Post) is completely unchanged — it all still operates
+  on the single `result` object the backend returns, regardless of how many
+  photos went in.
+- **Status: done, verified live** via a real Playwright + Anthropic API pass:
+  picked 3 photos → removed one → re-added a different one via the "+" tile
+  → generated and got one caption/summary describing "three bold primary
+  color swatches" as a set (not three separate captions), with platform
+  suggestions explicitly referencing "carousels" (Pinterest, Instagram,
+  Threads) → confirmed the Post Preview carousel pages between slides with
+  working dot indicators (verified via a horizontal wheel-scroll gesture,
+  since raw mouse-drag doesn't trigger web scroll containers the way touch
+  does). Also regression-tested the single-photo path end to end — the model
+  correctly still writes single-photo language ("a bold, solid red image"),
+  no carousel phrasing, no console errors either run.
+  - **Not independently re-tested this session:** the single-video path
+    (frame extraction + analysis). It shares 100% of its code path with the
+    pre-existing single-photo flow (same `processAsset` helper, same
+    `analyze()` call with a 1-length `images` array), so risk is low, but it
+    wasn't clicked through live — no video test fixture was available in this
+    environment.
 
 ---
 
@@ -152,8 +220,9 @@ Store your handles once; tap a suggested platform to get the caption rewritten f
 | Voice settings | ✅ Done | Playwright + real API, this session |
 | Personal context weaving | ✅ Done | Playwright + real API, this session |
 | Profile/platform settings | ✅ Done | Playwright + real API, this session |
-| Clickable platform → optimize | ✅ Done | Playwright + real API, this session |
+| Multi-select platform checkboxes + per-platform optimize | ✅ Done (redesigned from single-tap-select) | Playwright + real API, this session |
 | Open & Post | ✅ Done (after a bug fix, see §5) | Playwright, this session |
+| Multi-photo carousel creation | ✅ Done (photos only, no reorder, 10-slide cap) | Playwright + real API, this session |
 | Blog/story/email/podcast generation | ❌ Not built | — |
 | AI image prompts | ❌ Not built | — |
 | Native (iOS/Android) testing | ❌ Not done | Only Expo web tested |
@@ -165,6 +234,13 @@ Store your handles once; tap a suggested platform to get the caption rewritten f
 
 **Fixed this session (documented so it isn't "rediscovered" as new):**
 - `openAndPost` in `index.tsx` originally called `await Clipboard.setStringAsync(...)` **before** `window.open(...)`. Browsers only allow `window.open` synchronously within a trusted click's call stack — anything after an `await` gets silently blocked as a popup. Fixed by moving `window.open` to fire first (synchronously), then awaiting the clipboard write. Confirmed fixed with a real new-tab-opens test.
+- `POST /api/analyze-media` (`media.ts`) returned a generic "Something went wrong" for **any** failure — the `catch {}` block didn't bind or log the error at all, so real failures were invisible in the server logs. Reported live: uploading 7 photos in a carousel and generating threw this generic error. Root-caused and fixed:
+  - The catch block now logs via the existing pino `logger` (`err`, `imageCount`, `mediaType`, and the raw model response text) so any future failure is diagnosable instead of a black box.
+  - `contentCategories` used a **strict** zod enum (exactly 7 fixed values) for the model's per-photo policy classification. If the model's category wording for even one photo in a set didn't match exactly (e.g. `"violence"` instead of `"graphic_violence"`), the *entire* response failed schema validation and 502'd — directly tying an apparent "carousel" bug to the policy-scanning step. Fixed by preprocessing the array to silently drop any category the model returns that isn't one of the 7 known values, instead of failing the whole request over one hallucinated label.
+  - JSON extraction from the model's response now takes the substring between the first `{` and last `}` (instead of trusting the whole trimmed response is valid JSON), guarding against stray prose before/after the JSON object.
+  - `max_tokens` bumped from 2048 → 4096 as headroom against truncation on longer carousel responses.
+  - Verified after the fix with three separate 7-photo reproductions (solid-color test images, 7 full-resolution real photos totaling 8.75MB, and a live UI-driven Playwright run through the actual Create screen) — all three now return 200 with valid results and no console errors. Could not force a deterministic repro of the exact original failure (LLM output is inherently non-deterministic — one of the real-photo runs did legitimately trigger `copyrighted_material` policy flags on Windows wallpaper images, a later identical-input run did not), so the logging is the safety net if it recurs: check `logger.error` output for `rawModelText` and the zod/JSON error next time.
+- **Caption got wiped after editing it, then tapping an AI-suggested platform.** Root cause: tapping a platform did two things at once — select it *and* immediately call `/api/remix` to rewrite the caption in that platform's style, overwriting `editedCaption` with whatever the model returned. Confirmed live that `/api/remix`'s model can occasionally misinterpret unusual input as a "placeholder" and return a conversational non-caption reply instead of a rewrite (reproduced directly: feeding it a template-looking string like `MY_DISTINCTIVE_EDIT_12345` got back *"It looks like the original text didn't come through..."* instead of a rewritten caption) — that reply would silently become the new "caption." Fixed by decoupling the two actions entirely: selecting a platform (now a checkbox — see §3.7's redesign) is a pure state toggle that never touches `editedCaption`; optimizing for a platform's style is now a separate, explicit "Optimize for {Platform}" action the user triggers on purpose. Verified live: manually edited caption, checked/unchecked multiple platform checkboxes (0 `/api/remix` calls fired), then tapped "Optimize for Facebook" explicitly (exactly 1 call fired, correctly rewrote the manually-edited text while preserving its meaning).
 
 **Pre-existing, NOT introduced by any of this work — do not "fix" these without checking if it's in scope:**
 - `artifacts/mobile/hooks/useColors.ts` line ~21: `TS2352` type error casting the colors object. Present before any of this session's work.
@@ -247,6 +323,7 @@ If you rename/move files under `app/(tabs)/`, **clear the Expo cache and fully r
 | `app/(tabs)/settings.tsx` | Settings screen — voice + 11 handles |
 | `components/RemixableField.tsx` | Shared editable-text + Remix component |
 | `components/PolicyWarnings.tsx` | Shared policy-flag warning card |
+| `components/CarouselPreview.tsx` | Swipeable, paginated image carousel with dot indicators (Post Preview) |
 | `hooks/useColors.ts` | Design tokens (pre-existing) |
 | `hooks/useSettings.ts` | Settings load/save hook, refreshes on tab focus |
 | `lib/settings.ts` | Settings types + AsyncStorage persistence |

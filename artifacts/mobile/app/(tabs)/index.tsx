@@ -19,20 +19,23 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { CarouselPreview } from "@/components/CarouselPreview";
 import { PolicyWarnings, type PolicyFlag } from "@/components/PolicyWarnings";
 import { RemixableField } from "@/components/RemixableField";
 import { useColors } from "@/hooks/useColors";
 import { useSettings } from "@/hooks/useSettings";
 import { apiUrl } from "@/lib/apiBase";
 import { extractVideoFrame } from "@/lib/extractVideoFrame";
-import { PLATFORMS } from "@/lib/platforms";
+import { HANDLE_PLATFORM_IDS, PLATFORMS } from "@/lib/platforms";
 import { callRemix } from "@/lib/remix";
 import type { HandlePlatformId } from "@/lib/settings";
 
-type SuggestedPlatformId = Exclude<HandlePlatformId, "substack">;
+type PlatformId = Exclude<HandlePlatformId, "substack">;
+
+const ALL_PLATFORM_IDS = HANDLE_PLATFORM_IDS.filter((id): id is PlatformId => id !== "substack");
 
 type PlatformSuggestion = {
-  id: SuggestedPlatformId;
+  id: PlatformId;
   label: string;
   reason: string;
 };
@@ -44,9 +47,12 @@ type MediaAnalysisResult = {
   platforms: PlatformSuggestion[];
 };
 
-type SelectedMedia = {
+type MediaItem = {
+  id: string;
   kind: "photo" | "video";
   previewUri: string;
+  base64: string;
+  mimeType: "image/jpeg";
 };
 
 export default function CreateScreen() {
@@ -55,8 +61,7 @@ export default function CreateScreen() {
   const router = useRouter();
   const { settings } = useSettings();
 
-  const [media, setMedia] = useState<SelectedMedia | null>(null);
-  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [media, setMedia] = useState<MediaItem[]>([]);
   const [preparing, setPreparing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<MediaAnalysisResult | null>(null);
@@ -67,19 +72,51 @@ export default function CreateScreen() {
   const [editedCaption, setEditedCaption] = useState("");
   const [editedHashtags, setEditedHashtags] = useState("");
   const [policyFlags, setPolicyFlags] = useState<PolicyFlag[]>([]);
-  const [activePlatform, setActivePlatform] = useState<SuggestedPlatformId | null>(null);
-  const [optimizingPlatform, setOptimizingPlatform] = useState<SuggestedPlatformId | null>(null);
+  const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformId[]>([]);
+  const [optimizingPlatform, setOptimizingPlatform] = useState<PlatformId | null>(null);
 
   const lastCheckedCaptionRef = useRef<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const canGenerate = !preparing && !analyzing && !!imageBase64;
+  const canGenerate = !preparing && !analyzing && media.length > 0;
 
-  const pickMedia = async () => {
+  const resetResults = () => {
     setError("");
     setResult(null);
     setPolicyFlags([]);
-    setActivePlatform(null);
+    setSelectedPlatforms([]);
+  };
+
+  const processAsset = async (
+    uri: string,
+    kind: "photo" | "video"
+  ): Promise<MediaItem | null> => {
+    try {
+      const frameUri = kind === "video" ? await extractVideoFrame(uri) : uri;
+      const manipulated = await ImageManipulator.manipulateAsync(
+        frameUri,
+        [{ resize: { width: 1024 } }],
+        {
+          compress: 0.7,
+          format: ImageManipulator.SaveFormat.JPEG,
+          base64: true,
+        }
+      );
+      if (!manipulated.base64) return null;
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        kind,
+        previewUri: manipulated.uri,
+        base64: manipulated.base64,
+        mimeType: "image/jpeg",
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const pickInitialMedia = async () => {
+    resetResults();
 
     if (Platform.OS !== "web") {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -92,30 +129,37 @@ export default function CreateScreen() {
     const picked = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images", "videos"],
       quality: 0.9,
+      allowsMultipleSelection: true,
+      selectionLimit: 10,
     });
-    if (picked.canceled || !picked.assets?.[0]) return;
+    if (picked.canceled || !picked.assets?.length) return;
 
-    const asset = picked.assets[0];
-    const kind: "photo" | "video" = asset.type === "video" ? "video" : "photo";
+    let assets = picked.assets;
+    let droppedVideo = false;
+    if (assets.length > 1) {
+      const before = assets.length;
+      assets = assets.filter((a) => a.type !== "video");
+      droppedVideo = assets.length < before;
+      if (assets.length === 0) return;
+    }
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setPreparing(true);
-    setMedia(null);
-    setImageBase64(null);
+    setMedia([]);
 
     try {
-      const frameUri = kind === "video" ? await extractVideoFrame(asset.uri) : asset.uri;
-      const manipulated = await ImageManipulator.manipulateAsync(
-        frameUri,
-        [{ resize: { width: 1024 } }],
-        {
-          compress: 0.7,
-          format: ImageManipulator.SaveFormat.JPEG,
-          base64: true,
-        }
+      const items = await Promise.all(
+        assets.map((a) => processAsset(a.uri, a.type === "video" ? "video" : "photo"))
       );
-      setMedia({ kind, previewUri: manipulated.uri });
-      setImageBase64(manipulated.base64 ?? null);
+      const valid = items.filter((i): i is MediaItem => i !== null);
+      if (valid.length === 0) {
+        setError("Couldn't process that file. Try a different photo or video.");
+        return;
+      }
+      setMedia(valid);
+      if (droppedVideo) {
+        setError("Videos can't be part of a photo carousel — added the photos only.");
+      }
     } catch {
       setError("Couldn't process that file. Try a different photo or video.");
     } finally {
@@ -123,22 +167,57 @@ export default function CreateScreen() {
     }
   };
 
+  const addPhoto = async () => {
+    if (Platform.OS !== "web") {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setError("We need access to your photos to continue.");
+        return;
+      }
+    }
+
+    const picked = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      quality: 0.9,
+    });
+    if (picked.canceled || !picked.assets?.[0]) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setPreparing(true);
+    resetResults();
+
+    try {
+      const item = await processAsset(picked.assets[0].uri, "photo");
+      if (!item) {
+        setError("Couldn't process that file. Try a different photo.");
+        return;
+      }
+      setMedia((prev) => [...prev, item]);
+    } finally {
+      setPreparing(false);
+    }
+  };
+
+  const removeMediaItem = (id: string) => {
+    resetResults();
+    setMedia((prev) => prev.filter((m) => m.id !== id));
+  };
+
   const analyze = async () => {
-    if (!canGenerate || !media || !imageBase64) return;
+    if (!canGenerate || media.length === 0) return;
     setAnalyzing(true);
     setResult(null);
     setError("");
     setPolicyFlags([]);
-    setActivePlatform(null);
+    setSelectedPlatforms([]);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
       const res = await fetch(apiUrl("/api/analyze-media"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mediaType: media.kind,
-          imageBase64,
-          mimeType: "image/jpeg",
+          mediaType: media[0].kind,
+          images: media.map((m) => ({ imageBase64: m.base64, mimeType: m.mimeType })),
           voice: settings.voice,
           personalContext: personalContext.trim() || null,
         }),
@@ -196,9 +275,15 @@ export default function CreateScreen() {
     setTimeout(() => setCopiedId(null), 1800);
   };
 
-  const selectPlatform = async (id: SuggestedPlatformId) => {
+  const togglePlatform = (id: PlatformId) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setActivePlatform(id);
+    setSelectedPlatforms((prev) =>
+      prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
+    );
+  };
+
+  const optimizeForPlatform = async (id: PlatformId) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setOptimizingPlatform(id);
     try {
       const meta = PLATFORMS[id];
@@ -214,7 +299,7 @@ export default function CreateScreen() {
     }
   };
 
-  const openAndPost = async (id: SuggestedPlatformId) => {
+  const openAndPost = async (id: PlatformId) => {
     const meta = PLATFORMS[id];
     const handle = settings.handles[id];
     const url = meta.composeUrl ? meta.composeUrl(editedCaption, handle) : meta.profileUrl(handle);
@@ -237,8 +322,19 @@ export default function CreateScreen() {
   const bottomPad = Platform.OS === "web" ? 34 : insets.bottom + 24;
   const isDark = colors.background === "#080c14";
 
-  const activeHandle = activePlatform ? settings.handles[activePlatform] : undefined;
-  const previewHandle = activeHandle ? `@${activeHandle}` : "your.handle";
+  // With multiple platforms selectable, prefer showing the handle for whichever
+  // selected platform actually has one saved; fall back to the first selection.
+  const previewPlatformId =
+    selectedPlatforms.find((id) => settings.handles[id]) ?? selectedPlatforms[0];
+  const previewHandleRaw = previewPlatformId ? settings.handles[previewPlatformId] : undefined;
+  const previewHandle = previewHandleRaw ? `@${previewHandleRaw}` : "your.handle";
+
+  const orderedPlatformIds: PlatformId[] = result
+    ? [
+        ...result.platforms.map((p) => p.id),
+        ...ALL_PLATFORM_IDS.filter((id) => !result.platforms.some((p) => p.id === id)),
+      ]
+    : ALL_PLATFORM_IDS;
 
   return (
     <View style={[s.root, { backgroundColor: colors.background }]}>
@@ -323,28 +419,62 @@ export default function CreateScreen() {
           ]}
         >
           <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
-            YOUR PHOTO OR VIDEO
+            YOUR PHOTO(S) OR VIDEO
           </Text>
 
-          {media ? (
+          {media.length > 0 ? (
             <View>
-              <View style={s.previewWrap}>
-                <Image
-                  source={{ uri: media.previewUri }}
-                  style={[s.previewImage, { borderColor: colors.border }]}
-                  contentFit="cover"
-                />
-                {media.kind === "video" && (
-                  <View style={s.videoBadge}>
-                    <Ionicons name="videocam" size={12} color="#fff" />
-                    <Text style={s.videoBadgeText}>VIDEO</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={s.thumbStrip}
+              >
+                {media.map((item) => (
+                  <View key={item.id} style={s.thumbWrap}>
+                    <Image
+                      source={{ uri: item.previewUri }}
+                      style={[s.thumbImage, { borderColor: colors.border }]}
+                      contentFit="cover"
+                    />
+                    {item.kind === "video" && (
+                      <View style={s.videoBadgeSmall}>
+                        <Ionicons name="videocam" size={10} color="#fff" />
+                      </View>
+                    )}
+                    <TouchableOpacity
+                      style={s.removeThumbBtn}
+                      onPress={() => removeMediaItem(item.id)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Ionicons name="close" size={12} color="#fff" />
+                    </TouchableOpacity>
                   </View>
+                ))}
+                {media[0].kind === "photo" && media.length < 10 && (
+                  <TouchableOpacity
+                    style={[
+                      s.addThumbTile,
+                      {
+                        borderColor: isDark ? "#1e3a5f" : "#c7d2fe",
+                        backgroundColor: isDark ? "#060a10" : "#f8f9ff",
+                      },
+                    ]}
+                    onPress={addPhoto}
+                    activeOpacity={0.7}
+                    disabled={preparing}
+                  >
+                    {preparing ? (
+                      <ActivityIndicator size="small" color="#818cf8" />
+                    ) : (
+                      <Ionicons name="add" size={22} color="#818cf8" />
+                    )}
+                  </TouchableOpacity>
                 )}
-              </View>
-              <TouchableOpacity onPress={pickMedia} style={s.changeLinkRow}>
+              </ScrollView>
+              <TouchableOpacity onPress={pickInitialMedia} style={s.changeLinkRow}>
                 <Ionicons name="swap-horizontal" size={13} color="#818cf8" />
                 <Text style={[s.exampleLink, { color: "#818cf8" }]}>
-                  Choose a different file
+                  Start over with a different file
                 </Text>
               </TouchableOpacity>
             </View>
@@ -357,7 +487,7 @@ export default function CreateScreen() {
                   backgroundColor: isDark ? "#060a10" : "#f8f9ff",
                 },
               ]}
-              onPress={pickMedia}
+              onPress={pickInitialMedia}
               activeOpacity={0.7}
               disabled={preparing}
             >
@@ -375,7 +505,7 @@ export default function CreateScreen() {
                     Tap to upload a photo or video
                   </Text>
                   <Text style={[s.dropZoneHint, { color: colors.mutedForeground }]}>
-                    JPG, PNG, or MP4
+                    JPG, PNG, or MP4 — pick more than one to make a carousel
                   </Text>
                 </>
               )}
@@ -414,7 +544,8 @@ export default function CreateScreen() {
           <View style={[s.genBtn, { backgroundColor: isDark ? "#1a2540" : "#e8eaf5" }]}>
             <ActivityIndicator size="small" color="#818cf8" />
             <Text style={[s.genBtnText, { color: "#818cf8" }]}>
-              Taking a look at your {media?.kind ?? "file"}...
+              Taking a look at your{" "}
+              {media.length > 1 ? `${media.length} photos` : media[0]?.kind ?? "file"}...
             </Text>
           </View>
         ) : canGenerate ? (
@@ -449,7 +580,7 @@ export default function CreateScreen() {
         )}
 
         {/* Results */}
-        {result && media && (
+        {result && media.length > 0 && (
           <View style={s.results}>
             <View style={[s.resultsDivider, { borderBottomColor: colors.border }]}>
               <Text style={[s.cardLabel, { color: colors.mutedForeground }]}>
@@ -590,62 +721,95 @@ export default function CreateScreen() {
                 </Text>
               </View>
               <Text style={[s.platformHint, { color: colors.mutedForeground }]}>
-                Tap a platform to rewrite your caption for it
+                Check every platform you're planning to post to — AI PICK marks
+                what we think fits best. Tap the wand to optimize your caption
+                for any of them.
               </Text>
               <View style={{ marginTop: 10, gap: 8 }}>
-                {result.platforms.map((p) => {
-                  const active = activePlatform === p.id;
-                  const optimizing = optimizingPlatform === p.id;
+                {orderedPlatformIds.map((id) => {
+                  const meta = PLATFORMS[id];
+                  const suggestion = result.platforms.find((p) => p.id === id);
+                  const selected = selectedPlatforms.includes(id);
+                  const optimizing = optimizingPlatform === id;
                   return (
-                    <View key={p.id}>
+                    <View key={id}>
                       <TouchableOpacity
                         style={[
                           s.formatRow,
                           {
-                            backgroundColor: active
+                            backgroundColor: selected
                               ? isDark
                                 ? "#0f1e35"
                                 : "#eef0ff"
                               : "transparent",
-                            borderColor: active ? "#3b5bdb" : colors.border,
+                            borderColor: selected ? "#3b5bdb" : colors.border,
                           },
                         ]}
-                        onPress={() => selectPlatform(p.id)}
+                        onPress={() => togglePlatform(id)}
                         activeOpacity={0.7}
                       >
-                        {optimizing ? (
-                          <ActivityIndicator size="small" color="#818cf8" />
-                        ) : (
-                          <MaterialCommunityIcons
-                            name={PLATFORMS[p.id].icon as never}
-                            size={18}
-                            color="#818cf8"
-                          />
-                        )}
+                        <Ionicons
+                          name={selected ? "checkbox" : "square-outline"}
+                          size={19}
+                          color={selected ? "#818cf8" : colors.mutedForeground}
+                        />
+                        <MaterialCommunityIcons
+                          name={meta.icon as never}
+                          size={18}
+                          color="#818cf8"
+                        />
                         <View style={s.formatMeta}>
-                          <Text style={[s.formatLabel, { color: colors.foreground }]}>
-                            {p.label}
-                          </Text>
-                          <Text style={[s.formatDesc, { color: colors.mutedForeground }]}>
-                            {p.reason}
-                          </Text>
+                          <View style={s.formatLabelRow}>
+                            <Text style={[s.formatLabel, { color: colors.foreground }]}>
+                              {meta.label}
+                            </Text>
+                            {suggestion && (
+                              <View
+                                style={[
+                                  s.aiPickBadge,
+                                  { backgroundColor: isDark ? "#0f1e35" : "#eef0ff" },
+                                ]}
+                              >
+                                <Text style={s.aiPickBadgeText}>AI PICK</Text>
+                              </View>
+                            )}
+                          </View>
+                          {suggestion && (
+                            <Text style={[s.formatDesc, { color: colors.mutedForeground }]}>
+                              {suggestion.reason}
+                            </Text>
+                          )}
                         </View>
-                        {active && !optimizing && (
-                          <Ionicons name="checkmark-circle" size={18} color="#818cf8" />
-                        )}
                       </TouchableOpacity>
-                      {active && (
-                        <TouchableOpacity
-                          onPress={() => openAndPost(p.id)}
-                          style={s.openPostBtn}
-                          activeOpacity={0.85}
-                        >
-                          <Ionicons name="open-outline" size={14} color="#818cf8" />
-                          <Text style={[s.openPostBtnText, { color: "#818cf8" }]}>
-                            Open {p.label} &amp; Post
-                            {settings.handles[p.id] ? ` (@${settings.handles[p.id]})` : ""}
-                          </Text>
-                        </TouchableOpacity>
+                      {selected && (
+                        <View style={s.platformActionsRow}>
+                          <TouchableOpacity
+                            onPress={() => optimizeForPlatform(id)}
+                            style={s.optimizeBtn}
+                            activeOpacity={0.7}
+                            disabled={optimizing}
+                          >
+                            {optimizing ? (
+                              <ActivityIndicator size="small" color="#818cf8" />
+                            ) : (
+                              <Ionicons name="color-wand-outline" size={13} color="#818cf8" />
+                            )}
+                            <Text style={[s.openPostBtnText, { color: "#818cf8" }]}>
+                              Optimize for {meta.label}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => openAndPost(id)}
+                            style={s.openPostBtn}
+                            activeOpacity={0.85}
+                          >
+                            <Ionicons name="open-outline" size={14} color="#818cf8" />
+                            <Text style={[s.openPostBtnText, { color: "#818cf8" }]}>
+                              Open {meta.label} &amp; Post
+                              {settings.handles[id] ? ` (@${settings.handles[id]})` : ""}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
                       )}
                     </View>
                   );
@@ -682,11 +846,7 @@ export default function CreateScreen() {
                   style={{ marginLeft: "auto" }}
                 />
               </View>
-              <Image
-                source={{ uri: media.previewUri }}
-                style={s.previewPostImage}
-                contentFit="cover"
-              />
+              <CarouselPreview uris={media.map((m) => m.previewUri)} />
               <View style={s.previewCaptionArea}>
                 <Text style={[s.previewCaptionText, { color: colors.foreground }]}>
                   <Text style={{ fontFamily: "Inter_700Bold" }}>{previewHandle} </Text>
@@ -792,30 +952,41 @@ const s = StyleSheet.create({
     marginTop: 4,
   },
   dropZoneHint: { fontSize: 11, fontFamily: "Inter_400Regular" },
-  previewWrap: { position: "relative" },
-  previewImage: {
-    width: "100%",
-    aspectRatio: 1,
-    borderRadius: 12,
+  thumbStrip: { gap: 10, paddingRight: 4 },
+  thumbWrap: { position: "relative", width: 76, height: 76 },
+  thumbImage: {
+    width: 76,
+    height: 76,
+    borderRadius: 10,
     borderWidth: 1,
   },
-  videoBadge: {
+  videoBadgeSmall: {
     position: "absolute",
-    top: 10,
-    left: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
+    top: 5,
+    left: 5,
     backgroundColor: "rgba(0,0,0,0.65)",
     borderRadius: 20,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
+    padding: 3,
   },
-  videoBadgeText: {
-    color: "#fff",
-    fontSize: 9,
-    letterSpacing: 0.8,
-    fontFamily: "Inter_600SemiBold",
+  removeThumbBtn: {
+    position: "absolute",
+    top: -5,
+    right: -5,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    borderRadius: 10,
+    width: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  addThumbTile: {
+    width: 76,
+    height: 76,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderStyle: "dashed",
+    alignItems: "center",
+    justifyContent: "center",
   },
   changeLinkRow: {
     flexDirection: "row",
@@ -834,20 +1005,41 @@ const s = StyleSheet.create({
     padding: 10,
   },
   formatMeta: { flex: 1 },
+  formatLabelRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   formatLabel: {
     fontSize: 13,
     fontWeight: "600",
     fontFamily: "Inter_600SemiBold",
   },
+  aiPickBadge: {
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  aiPickBadgeText: {
+    fontSize: 8,
+    letterSpacing: 0.5,
+    color: "#818cf8",
+    fontFamily: "Inter_600SemiBold",
+  },
   formatDesc: { fontSize: 10, marginTop: 2, fontFamily: "Inter_400Regular" },
-  platformHint: { fontSize: 10.5, fontFamily: "Inter_400Regular", marginTop: -6 },
+  platformHint: { fontSize: 10.5, fontFamily: "Inter_400Regular", marginTop: -6, lineHeight: 15 },
+  platformActionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 16,
+    marginTop: 6,
+    marginLeft: 4,
+  },
+  optimizeBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   openPostBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    marginTop: 6,
-    marginLeft: 4,
-    alignSelf: "flex-start",
   },
   openPostBtnText: { fontSize: 11.5, fontFamily: "Inter_600SemiBold" },
   genBtn: {
@@ -953,7 +1145,6 @@ const s = StyleSheet.create({
     fontWeight: "700",
     fontFamily: "Inter_700Bold",
   },
-  previewPostImage: { width: "100%", aspectRatio: 1 },
   previewCaptionArea: { padding: 14, gap: 8 },
   previewCaptionText: {
     fontSize: 13,

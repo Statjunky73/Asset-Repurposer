@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
+import { logger } from "../lib/logger";
 import { buildPolicyFlags, ContentCategorySchema, PolicyFlagSchema, PolicyPlatformSchema } from "../lib/policyKb";
 
 const router = Router();
@@ -15,8 +16,15 @@ const VoiceSchema = z.enum([
 
 const AnalyzeMediaBodySchema = z.object({
   mediaType: z.enum(["photo", "video"]),
-  imageBase64: z.string().min(1),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  images: z
+    .array(
+      z.object({
+        imageBase64: z.string().min(1),
+        mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+      })
+    )
+    .min(1)
+    .max(10),
   voice: VoiceSchema.nullish(),
   personalContext: z.string().max(300).nullish(),
 });
@@ -32,7 +40,13 @@ const MediaAnalysisResultSchema = z.object({
   caption: z.string(),
   hashtags: z.array(z.string()).min(5).max(12),
   platforms: z.array(PlatformSchema).min(1).max(4),
-  contentCategories: z.array(ContentCategorySchema),
+  // Preprocessed to drop any category the model invents that isn't in our fixed
+  // enum (e.g. "violence" instead of "graphic_violence") — one hallucinated
+  // label shouldn't fail the whole response when we can just ignore it.
+  contentCategories: z.preprocess(
+    (val) => (Array.isArray(val) ? val.filter((v) => ContentCategorySchema.safeParse(v).success) : val),
+    z.array(ContentCategorySchema)
+  ),
 });
 
 const VOICE_GUIDANCE: Record<z.infer<typeof VoiceSchema>, string> = {
@@ -50,10 +64,17 @@ const VOICE_GUIDANCE: Record<z.infer<typeof VoiceSchema>, string> = {
 
 function buildPrompt(input: {
   mediaType: "photo" | "video";
+  imageCount: number;
   voice?: string | null;
   personalContext?: string | null;
 }) {
-  const subject = input.mediaType === "video" ? "video (shown as a key frame)" : "photo";
+  const isCarousel = input.mediaType === "photo" && input.imageCount > 1;
+  const subject =
+    input.mediaType === "video"
+      ? "video (shown as a key frame)"
+      : isCarousel
+        ? `carousel of ${input.imageCount} photos`
+        : "photo";
 
   const voiceInstruction = input.voice
     ? VOICE_GUIDANCE[input.voice as keyof typeof VOICE_GUIDANCE]
@@ -62,6 +83,10 @@ function buildPrompt(input: {
   const personalContextInstruction = input.personalContext
     ? `The user told you this personal context about the moment: "${input.personalContext}". Weave it in naturally like a real detail they'd mention to a friend — don't just tack it on as a separate sentence.`
     : "No personal context was given — just react to what's in the image.";
+
+  const carouselInstruction = isCarousel
+    ? `\nCAROUSEL: These ${input.imageCount} photos are posted together as one single carousel post, shown to you in the order they'll appear (the first is the cover slide). Write ONE caption for the whole set as a single story or moment — do not caption each photo individually. The "summary" field should describe the set as a whole, not one photo.\n`
+    : "";
 
   return `You are a sharp, creative friend who just got handed someone's phone with this ${subject} on it. You instantly know what it's about and exactly how to caption it. Be warm and specific — never generic or corporate.
 
@@ -73,8 +98,8 @@ Default captions to 1-3 short sentences unless the voice below calls for more.
 VOICE: ${voiceInstruction}
 
 PERSONAL CONTEXT: ${personalContextInstruction}
-
-Also look carefully at the image itself and note if it contains any of these categories (be conservative — only flag if genuinely present, not just adjacent-themed):
+${carouselInstruction}
+Also look carefully at ${isCarousel ? "each of the photos" : "the image itself"} and note if ${isCarousel ? "any of them contain" : "it contains"} any of these categories (be conservative — only flag if genuinely present, not just adjacent-themed):
 - nudity_sexual_content
 - graphic_violence
 - hate_speech (hateful symbols, slurs, imagery)
@@ -111,34 +136,42 @@ router.post("/analyze-media", async (req, res) => {
     return;
   }
 
-  const { mediaType, imageBase64, mimeType, voice, personalContext } = parse.data;
-  const prompt = buildPrompt({ mediaType, voice, personalContext });
+  const { mediaType, images, voice, personalContext } = parse.data;
+  const prompt = buildPrompt({ mediaType, imageCount: images.length, voice, personalContext });
 
+  let text = "";
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 2048,
+      max_tokens: 4096,
       messages: [
         {
           role: "user",
           content: [
-            {
-              type: "image",
-              source: { type: "base64", media_type: mimeType, data: imageBase64 },
-            },
+            ...images.map((img) => ({
+              type: "image" as const,
+              source: { type: "base64" as const, media_type: img.mimeType, data: img.imageBase64 },
+            })),
             { type: "text", text: prompt },
           ],
         },
       ],
     });
 
-    const text = message.content
+    text = message.content
       .filter((b) => b.type === "text")
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
 
+    // The model is asked for JSON only, but strip markdown fences and any stray
+    // prose before/after the object defensively rather than trusting that.
     const clean = text.replace(/```json|```/g, "").trim();
-    const json = JSON.parse(clean);
+    const firstBrace = clean.indexOf("{");
+    const lastBrace = clean.lastIndexOf("}");
+    if (firstBrace === -1 || lastBrace === -1) {
+      throw new Error("No JSON object found in model response");
+    }
+    const json = JSON.parse(clean.slice(firstBrace, lastBrace + 1));
     const parsed = MediaAnalysisResultSchema.parse(json);
 
     const policyFlags = buildPolicyFlags(parsed.contentCategories, "image");
@@ -152,7 +185,11 @@ router.post("/analyze-media", async (req, res) => {
       },
       policyFlags: PolicyFlagSchema.array().parse(policyFlags),
     });
-  } catch {
+  } catch (err) {
+    logger.error(
+      { err, imageCount: images.length, mediaType, rawModelText: text },
+      "analyze-media failed"
+    );
     res.status(502).json({ error: "Failed to analyze media. Please try again." });
   }
 });
