@@ -6,10 +6,10 @@ document should let you understand the whole project and continue without
 re-deriving context from git history or asking the user to re-explain
 things.
 
-Last updated: 2026-07-06 (end of session that added multi-photo carousel
-post creation, on top of the earlier session that added editable
-output/Remix, policy flagging, voice settings, and profile/platform
-settings).
+Last updated: 2026-07-07 (end of session that added per-photo text
+overlays, on top of earlier sessions that added multi-photo carousel post
+creation and, before that, editable output/Remix, policy flagging, voice
+settings, and profile/platform settings).
 
 ---
 
@@ -207,6 +207,86 @@ Instagram/Facebook/LinkedIn-style carousel post, not a single photo.
     wasn't clicked through live — no video test fixture was available in this
     environment.
 
+### 3.9 Feature: Per-photo text overlays (this session)
+
+Each photo gets an AI-suggested, editable, draggable, stylable text overlay
+("sticker/quote card") — separate from and alongside the single post
+caption, not instead of it. Scope, confirmed with the user before building:
+one overlay per photo (no stacked layers), a real flattened/exported image
+(not just an in-app preview), basic styling only (color/size/background
+pill — no rotation, no font choices), photos only (not video).
+
+- **Data model:** `PhotoOverlay` type (`artifacts/mobile/lib/overlay.ts`) —
+  `text`, `xPct`/`yPct` (0-1, position relative to image size),
+  `fontSize` (authored at a 1080px reference width, scaled at render time),
+  `color`, `backgroundEnabled`, `backgroundColor`. `MediaItem.overlay` is
+  `undefined` (no suggestion/not visited), `null` (explicitly
+  skipped/removed), or a `PhotoOverlay`.
+- **Backend:** `POST /api/analyze-media` (`media.ts`) now also returns
+  `photoOverlaySuggestions: string[]`, one short (≤8 words) suggestion per
+  input photo, aligned by index, empty string if a photo doesn't need one —
+  only generated when `mediaType === "photo"`. The route defensively pads/
+  truncates the model's array to `images.length` rather than trusting the
+  count, same defensive philosophy as the rest of this file's error
+  handling.
+- **`artifacts/mobile/components/OverlaidPhoto.tsx`** (new): the single
+  shared renderer — image + positioned/styled overlay text — reused by the
+  thumbnail strip, the Post Preview carousel (`CarouselPreview.tsx`), so
+  what's shown always matches what gets exported. Styling math itself lives
+  in `overlayTextStyle()` (`lib/overlay.ts`) so the interactive editor can
+  reuse the exact same computation for its own draggable text.
+- **`artifacts/mobile/components/PhotoOverlayEditor.tsx`** (new): a
+  full-screen modal opened by tapping any photo thumbnail. Drag-to-reposition
+  uses `react-native-gesture-handler`'s `Gesture.Pan().runOnJS(true)` (plain
+  JS-thread callbacks driving normal React state — deliberately not
+  worklet/Reanimated-driven, since a single draggable text label doesn't
+  need UI-thread animation and this keeps the gesture code simple).
+  Gesture-handler and Reanimated were already installed and already wired
+  at the app root (`app/_layout.tsx`'s `GestureHandlerRootView`) — no new
+  gesture infrastructure needed. Style controls: 6 color swatches, a
+  6-step size stepper, a background-pill on/off toggle. "Remove overlay"
+  clears it; tapping a photo with no suggestion yet opens the same editor
+  with an empty draft (the "Add text" path — there's no separate button for
+  this, tapping the thumbnail is the one entry point for both editing and
+  adding).
+- **Export ("Save Photo"):** `artifacts/mobile/lib/exportOverlay.ts` /
+  `.web.ts` (Metro platform-resolved split, matching the existing
+  `extractVideoFrame.ts`/`.web.ts` pattern). Web: draws the photo onto an
+  offscreen `<canvas>` at 1080×1080, draws the overlay text at the matching
+  position/size/color/pill (with its own greedy line-wrap and rounded-rect
+  helpers, since Canvas 2D has no built-in text wrapping), exports via
+  `canvas.toBlob()` and a generated `<a download>` link — no new dependency
+  needed on web. Native: `react-native-view-shot`'s `captureRef` captures
+  the editor's live canvas view directly (no separate hidden render needed
+  — view-shot can render a view at an arbitrary output resolution regardless
+  of its on-screen size) to a file, then `expo-media-library` saves it to
+  the photo library (with an `expo-media-library` plugin entry added to
+  `app.json` for the permission prompt string), falling back to
+  `expo-sharing`'s share sheet if the save permission is denied.
+- **New dependencies** (`artifacts/mobile/package.json`, installed via
+  `npx expo install` for SDK-54-correct versions): `react-native-view-shot`,
+  `expo-media-library`, `expo-sharing`.
+- **Status: done, verified live** via real Playwright runs against the real
+  API: generated a 3-photo carousel, confirmed all 3 thumbnails got an "Aa"
+  badge for their AI-suggested overlay; opened the editor, dragged the text
+  to a new position (confirmed via before/after DOM coordinates), toggled
+  the background pill off, tapped Save Photo, and confirmed a real ~12.7KB
+  JPEG downloaded via the browser — **opened the downloaded file and
+  visually confirmed the dragged text was baked into the actual pixels at
+  the correct position with no background pill**, a genuine WYSIWYG export.
+  Also verified: manually typing text into a photo that already had a
+  (different) AI suggestion correctly replaces it; the Post Preview carousel
+  renders the same overlay, same position/style, on the correct slide.
+  - **Not tested this session:** the native capture/save path
+    (`exportOverlay.ts`, `react-native-view-shot` + `expo-media-library` +
+    `expo-sharing`) — written carefully against the documented Expo APIs but
+    genuinely unverified, since only Expo web was exercised, consistent with
+    every other native-path gap already tracked in this file. If it doesn't
+    work on a real device, start by checking `app.json`'s
+    `expo-media-library` plugin config and whether a dev client rebuild
+    (not just a JS reload) is needed to pick up the three new native
+    modules.
+
 ---
 
 ## 4. Current status of each feature (at a glance)
@@ -223,6 +303,7 @@ Instagram/Facebook/LinkedIn-style carousel post, not a single photo.
 | Profile/platform settings | ✅ Done | Playwright + real API, this session |
 | Multi-select platform checkboxes + per-platform optimize | ✅ Done (redesigned from single-tap-select) | Playwright + real API, this session |
 | Per-platform "Use by default" → pre-checked on Create | ✅ Done | Playwright, this session |
+| Per-photo text overlays (suggest/edit/drag/style) | ✅ Done (web export verified; native export unverified) | Playwright + real API, this session |
 | Open & Post | ✅ Done (after a bug fix, see §5) | Playwright, this session |
 | Multi-photo carousel creation | ✅ Done (photos only, no reorder, 10-slide cap) | Playwright + real API, this session |
 | Blog/story/email/podcast generation | ❌ Not built | — |
@@ -257,7 +338,7 @@ Instagram/Facebook/LinkedIn-style carousel post, not a single photo.
 ## 6. What still needs to be built (next priorities, suggested order)
 
 1. **Extend policy scanning to Scripts/Repurpose screens**, if wanted — `/api/policy-check-text` already exists and is generic; this is mostly frontend wiring (reuse `PolicyWarnings` component).
-2. **Native (iOS/Android) verification pass** — literally everything has only been tested via Expo web in a browser. Video frame extraction in particular (`extractVideoFrame.ts`, the native path) has not been exercised end-to-end with a real device/simulator this session.
+2. **Native (iOS/Android) verification pass** — literally everything has only been tested via Expo web in a browser. Video frame extraction in particular (`extractVideoFrame.ts`, the native path) has not been exercised end-to-end with a real device/simulator this session. Same for the text-overlay export path (`exportOverlay.ts` — `react-native-view-shot` + `expo-media-library` + `expo-sharing`), which needs a dev client rebuild (new native modules, not just a JS reload) before it can even be tried.
 3. **Re-test the video-upload path** against the new pipeline (voice/context/policy/remix) — this session's live testing only exercised the photo path.
 4. **Remaining content types from the original vision**: blog articles, stories, emails, podcasts, AI image prompts. None have a backend route or screen yet. Follow the same pattern as `video-script.ts`/`media.ts`: dedicated endpoint + zod-validated structured response + a screen matching the existing visual language.
 5. **Branding decision**: rename in-app "Repurpose.ai" header text to "Imagine" — deferred as a user decision every time it's come up, never actioned. Ask before touching it.
@@ -326,10 +407,14 @@ If you rename/move files under `app/(tabs)/`, **clear the Expo cache and fully r
 | `components/RemixableField.tsx` | Shared editable-text + Remix component |
 | `components/PolicyWarnings.tsx` | Shared policy-flag warning card |
 | `components/CarouselPreview.tsx` | Swipeable, paginated image carousel with dot indicators (Post Preview) |
+| `components/OverlaidPhoto.tsx` | Shared image + positioned/styled text-overlay renderer |
+| `components/PhotoOverlayEditor.tsx` | Full-screen modal: drag-to-position overlay text, style controls, save/remove |
 | `hooks/useColors.ts` | Design tokens (pre-existing) |
 | `hooks/useSettings.ts` | Settings load/save hook, refreshes on tab focus |
 | `lib/settings.ts` | Settings types + AsyncStorage persistence |
 | `lib/platforms.ts` | Client-side platform metadata (icons, style hints, URLs) |
+| `lib/overlay.ts` | `PhotoOverlay` type, default/swatch/size-step constants, shared `overlayTextStyle()` |
+| `lib/exportOverlay.ts` / `.web.ts` | Platform-specific overlay export: native view-shot+media-library+sharing, web canvas+download |
 | `lib/apiBase.ts` | `apiUrl(path)` — protocol-aware API base URL helper |
 | `lib/remix.ts` | `callRemix(text, instruction)` shared client helper |
 | `lib/extractVideoFrame.ts` / `.web.ts` | Platform-specific video-frame extraction |

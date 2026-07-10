@@ -58,6 +58,9 @@
   },
   "dependencies": {
     "expo-image-manipulator": "~14.0.8",
-    "expo-video-thumbnails": "~10.0.8"
+    "expo-media-library": "~18.2.1",
+    "expo-sharing": "~14.0.8",
+    "expo-video-thumbnails": "~10.0.8",
+    "react-native-view-shot": "4.0.3"
   }
 }

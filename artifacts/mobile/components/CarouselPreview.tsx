@@ -1,21 +1,18 @@
 import { useState } from "react";
-import { Image } from "expo-image";
-import {
-  NativeScrollEvent,
-  NativeSyntheticEvent,
-  ScrollView,
-  StyleSheet,
-  View,
-} from "react-native";
+import { NativeScrollEvent, NativeSyntheticEvent, ScrollView, StyleSheet, View } from "react-native";
+import { OverlaidPhoto } from "@/components/OverlaidPhoto";
+import type { PhotoOverlay } from "@/lib/overlay";
 
-export function CarouselPreview({ uris }: { uris: string[] }) {
+type CarouselItem = { uri: string; overlay?: PhotoOverlay | null };
+
+export function CarouselPreview({ items }: { items: CarouselItem[] }) {
   const [width, setWidth] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
 
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     if (!width) return;
     const index = Math.round(e.nativeEvent.contentOffset.x / width);
-    setActiveIndex(Math.max(0, Math.min(index, uris.length - 1)));
+    setActiveIndex(Math.max(0, Math.min(index, items.length - 1)));
   };
 
   return (
@@ -29,14 +26,14 @@ export function CarouselPreview({ uris }: { uris: string[] }) {
           scrollEventThrottle={32}
           style={{ width, aspectRatio: 1 }}
         >
-          {uris.map((uri, i) => (
-            <Image key={i} source={{ uri }} style={{ width, aspectRatio: 1 }} contentFit="cover" />
+          {items.map((item, i) => (
+            <OverlaidPhoto key={i} uri={item.uri} overlay={item.overlay} width={width} />
           ))}
         </ScrollView>
       )}
-      {uris.length > 1 && (
+      {items.length > 1 && (
         <View style={s.dotsRow} pointerEvents="none">
-          {uris.map((_, i) => (
+          {items.map((_, i) => (
             <View
               key={i}
               style={[

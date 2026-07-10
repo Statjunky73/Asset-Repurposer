@@ -28,7 +28,13 @@
         }
       ],
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Imagine to save your exported photos to your library."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

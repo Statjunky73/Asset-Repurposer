@@ -47,6 +47,7 @@ const MediaAnalysisResultSchema = z.object({
     (val) => (Array.isArray(val) ? val.filter((v) => ContentCategorySchema.safeParse(v).success) : val),
     z.array(ContentCategorySchema)
   ),
+  photoOverlaySuggestions: z.array(z.string().max(80)).optional(),
 });
 
 const VOICE_GUIDANCE: Record<z.infer<typeof VoiceSchema>, string> = {
@@ -88,6 +89,11 @@ function buildPrompt(input: {
     ? `\nCAROUSEL: These ${input.imageCount} photos are posted together as one single carousel post, shown to you in the order they'll appear (the first is the cover slide). Write ONE caption for the whole set as a single story or moment — do not caption each photo individually. The "summary" field should describe the set as a whole, not one photo.\n`
     : "";
 
+  const overlayInstruction =
+    input.mediaType === "photo"
+      ? `\nTEXT OVERLAY SUGGESTIONS: Separately from the caption, suggest a short text overlay for each photo individually — like a punchy quote/sticker caption laid directly on top of that one photo (think a meme caption or a Instagram sticker, not a sentence). Max 8 words. This is per-photo and distinct from the overall post caption above. If a photo is busy, self-explanatory, or just doesn't need one, use an empty string for it instead of forcing something.\n`
+      : "";
+
   return `You are a sharp, creative friend who just got handed someone's phone with this ${subject} on it. You instantly know what it's about and exactly how to caption it. Be warm and specific — never generic or corporate.
 
 CRITICAL CAPTION STYLE RULE: captions must sound like a real person texting a friend, not a marketing agency. Short. Plain. A little rough around the edges is good.
@@ -98,7 +104,7 @@ Default captions to 1-3 short sentences unless the voice below calls for more.
 VOICE: ${voiceInstruction}
 
 PERSONAL CONTEXT: ${personalContextInstruction}
-${carouselInstruction}
+${carouselInstruction}${overlayInstruction}
 Also look carefully at ${isCarousel ? "each of the photos" : "the image itself"} and note if ${isCarousel ? "any of them contain" : "it contains"} any of these categories (be conservative — only flag if genuinely present, not just adjacent-themed):
 - nudity_sexual_content
 - graphic_violence
@@ -121,7 +127,12 @@ Respond with ONLY a valid JSON object in this exact shape, no markdown, no expla
       "reason": "one short sentence on why this ${subject} fits this platform"
     }
   ],
-  "contentCategories": ["zero or more of the category ids listed above, empty array if none apply"]
+  "contentCategories": ["zero or more of the category ids listed above, empty array if none apply"]${
+    input.mediaType === "photo"
+      ? `,
+  "photoOverlaySuggestions": ["one short overlay suggestion per photo, in the same order as the photos were shown, empty string \\"\\" if a photo doesn't need one — must have exactly ${input.imageCount} entries"]`
+      : ""
+  }
 }
 
 Pick 1-4 platforms that genuinely fit the content.
@@ -176,6 +187,13 @@ router.post("/analyze-media", async (req, res) => {
 
     const policyFlags = buildPolicyFlags(parsed.contentCategories, "image");
 
+    // Defensively align to images.length rather than trusting the model got the
+    // count exactly right — pad short arrays with "", drop any extra entries.
+    const photoOverlaySuggestions =
+      mediaType === "photo"
+        ? Array.from({ length: images.length }, (_, i) => parsed.photoOverlaySuggestions?.[i] ?? "")
+        : undefined;
+
     res.json({
       result: {
         summary: parsed.summary,
@@ -184,6 +202,7 @@ router.post("/analyze-media", async (req, res) => {
         platforms: parsed.platforms,
       },
       policyFlags: PolicyFlagSchema.array().parse(policyFlags),
+      photoOverlaySuggestions,
     });
   } catch (err) {
     logger.error(

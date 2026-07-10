@@ -20,12 +20,15 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { CarouselPreview } from "@/components/CarouselPreview";
+import { OverlaidPhoto } from "@/components/OverlaidPhoto";
+import { PhotoOverlayEditor } from "@/components/PhotoOverlayEditor";
 import { PolicyWarnings, type PolicyFlag } from "@/components/PolicyWarnings";
 import { RemixableField } from "@/components/RemixableField";
 import { useColors } from "@/hooks/useColors";
 import { useSettings } from "@/hooks/useSettings";
 import { apiUrl } from "@/lib/apiBase";
 import { extractVideoFrame } from "@/lib/extractVideoFrame";
+import { createDefaultOverlay, type PhotoOverlay } from "@/lib/overlay";
 import { HANDLE_PLATFORM_IDS, PLATFORMS } from "@/lib/platforms";
 import { callRemix } from "@/lib/remix";
 import type { HandlePlatformId } from "@/lib/settings";
@@ -53,6 +56,9 @@ type MediaItem = {
   previewUri: string;
   base64: string;
   mimeType: "image/jpeg";
+  // undefined = no AI suggestion / not visited yet, null = user explicitly
+  // skipped/removed it, PhotoOverlay = an active overlay.
+  overlay?: PhotoOverlay | null;
 };
 
 export default function CreateScreen() {
@@ -74,6 +80,7 @@ export default function CreateScreen() {
   const [policyFlags, setPolicyFlags] = useState<PolicyFlag[]>([]);
   const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformId[]>([]);
   const [optimizingPlatform, setOptimizingPlatform] = useState<PlatformId | null>(null);
+  const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
 
   const lastCheckedCaptionRef = useRef<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -203,6 +210,10 @@ export default function CreateScreen() {
     setMedia((prev) => prev.filter((m) => m.id !== id));
   };
 
+  const saveOverlay = (id: string, overlay: PhotoOverlay | null) => {
+    setMedia((prev) => prev.map((m) => (m.id === id ? { ...m, overlay } : m)));
+  };
+
   const analyze = async () => {
     if (!canGenerate || media.length === 0) return;
     setAnalyzing(true);
@@ -229,6 +240,14 @@ export default function CreateScreen() {
       setEditedHashtags(data.result.hashtags.map((h: string) => `#${h}`).join(" "));
       setPolicyFlags(data.policyFlags ?? []);
       setSelectedPlatforms(ALL_PLATFORM_IDS.filter((id) => settings.defaultPlatforms[id]));
+      const overlaySuggestions: string[] | undefined = data.photoOverlaySuggestions;
+      if (overlaySuggestions) {
+        setMedia((prev) =>
+          prev.map((item, i) =>
+            overlaySuggestions[i] ? { ...item, overlay: createDefaultOverlay(overlaySuggestions[i]) } : item
+          )
+        );
+      }
       lastCheckedCaptionRef.current = data.result.caption;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch {
@@ -434,14 +453,30 @@ export default function CreateScreen() {
               >
                 {media.map((item) => (
                   <View key={item.id} style={s.thumbWrap}>
-                    <Image
-                      source={{ uri: item.previewUri }}
-                      style={[s.thumbImage, { borderColor: colors.border }]}
-                      contentFit="cover"
-                    />
+                    <TouchableOpacity
+                      activeOpacity={0.8}
+                      disabled={item.kind !== "photo"}
+                      onPress={() => setEditingOverlayId(item.id)}
+                      style={[s.thumbTouchable, { borderColor: colors.border }]}
+                    >
+                      {item.kind === "photo" ? (
+                        <OverlaidPhoto uri={item.previewUri} overlay={item.overlay} width={76} />
+                      ) : (
+                        <Image
+                          source={{ uri: item.previewUri }}
+                          style={s.thumbImage}
+                          contentFit="cover"
+                        />
+                      )}
+                    </TouchableOpacity>
                     {item.kind === "video" && (
                       <View style={s.videoBadgeSmall}>
                         <Ionicons name="videocam" size={10} color="#fff" />
+                      </View>
+                    )}
+                    {item.kind === "photo" && item.overlay && (
+                      <View style={s.overlayBadge}>
+                        <Text style={s.overlayBadgeText}>Aa</Text>
                       </View>
                     )}
                     <TouchableOpacity
@@ -849,7 +884,9 @@ export default function CreateScreen() {
                   style={{ marginLeft: "auto" }}
                 />
               </View>
-              <CarouselPreview uris={media.map((m) => m.previewUri)} />
+              <CarouselPreview
+                items={media.map((m) => ({ uri: m.previewUri, overlay: m.overlay }))}
+              />
               <View style={s.previewCaptionArea}>
                 <Text style={[s.previewCaptionText, { color: colors.foreground }]}>
                   <Text style={{ fontFamily: "Inter_700Bold" }}>{previewHandle} </Text>
@@ -863,6 +900,13 @@ export default function CreateScreen() {
           </View>
         )}
       </ScrollView>
+      {editingOverlayId && (
+        <PhotoOverlayEditor
+          item={media.find((m) => m.id === editingOverlayId) ?? null}
+          onSave={(overlay) => saveOverlay(editingOverlayId, overlay)}
+          onClose={() => setEditingOverlayId(null)}
+        />
+      )}
     </View>
   );
 }
@@ -957,11 +1001,16 @@ const s = StyleSheet.create({
   dropZoneHint: { fontSize: 11, fontFamily: "Inter_400Regular" },
   thumbStrip: { gap: 10, paddingRight: 4 },
   thumbWrap: { position: "relative", width: 76, height: 76 },
-  thumbImage: {
+  thumbTouchable: {
     width: 76,
     height: 76,
     borderRadius: 10,
     borderWidth: 1,
+    overflow: "hidden",
+  },
+  thumbImage: {
+    width: 76,
+    height: 76,
   },
   videoBadgeSmall: {
     position: "absolute",
@@ -970,6 +1019,20 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.65)",
     borderRadius: 20,
     padding: 3,
+  },
+  overlayBadge: {
+    position: "absolute",
+    bottom: 5,
+    left: 5,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  overlayBadgeText: {
+    color: "#fff",
+    fontSize: 9,
+    fontFamily: "Inter_700Bold",
   },
   removeThumbBtn: {
     position: "absolute",
