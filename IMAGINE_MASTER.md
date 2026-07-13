@@ -6,10 +6,13 @@ document should let you understand the whole project and continue without
 re-deriving context from git history or asking the user to re-explain
 things.
 
-Last updated: 2026-07-07 (end of session that added per-photo text
-overlays, on top of earlier sessions that added multi-photo carousel post
-creation and, before that, editable output/Remix, policy flagging, voice
-settings, and profile/platform settings).
+Last updated: 2026-07-13 (end of session that set up EAS Build and
+attempted — but did not complete — native Android device testing of the
+per-photo text overlay export feature; see §3.9 and §5 for exactly where
+this was left off. Earlier sessions added per-photo text overlays,
+multi-photo carousel post creation, and before that, editable
+output/Remix, policy flagging, voice settings, and profile/platform
+settings).
 
 ---
 
@@ -277,15 +280,17 @@ pill — no rotation, no font choices), photos only (not video).
   Also verified: manually typing text into a photo that already had a
   (different) AI suggestion correctly replaces it; the Post Preview carousel
   renders the same overlay, same position/style, on the correct slide.
-  - **Not tested this session:** the native capture/save path
-    (`exportOverlay.ts`, `react-native-view-shot` + `expo-media-library` +
-    `expo-sharing`) — written carefully against the documented Expo APIs but
-    genuinely unverified, since only Expo web was exercised, consistent with
-    every other native-path gap already tracked in this file. If it doesn't
-    work on a real device, start by checking `app.json`'s
-    `expo-media-library` plugin config and whether a dev client rebuild
-    (not just a JS reload) is needed to pick up the three new native
-    modules.
+  - **Native capture/save path status: ATTEMPTED, UNRESOLVED (not done) —
+    see full write-up in §5** under "Native Android testing — attempted,
+    blocked, unresolved." Short version: got as far as successfully
+    building and installing a real dev client on an Android phone, but
+    every attempt to actually exercise the app's `/api/analyze-media` flow
+    from that phone failed with a generic client-side error, and the root
+    cause was never found — it's a network-reachability problem between the
+    phone and the dev machine, not a bug in the overlay/export code itself
+    (which was never actually reached to test). Do not re-verify the
+    export code's correctness as a first step next time; start from §5's
+    write-up instead.
 
 ---
 
@@ -308,7 +313,7 @@ pill — no rotation, no font choices), photos only (not video).
 | Multi-photo carousel creation | ✅ Done (photos only, no reorder, 10-slide cap) | Playwright + real API, this session |
 | Blog/story/email/podcast generation | ❌ Not built | — |
 | AI image prompts | ❌ Not built | — |
-| Native (iOS/Android) testing | ❌ Not done | Only Expo web tested |
+| Native (iOS/Android) testing | ⚠️ Attempted, blocked, unresolved | EAS dev-client build succeeded & installed on real Android device; app's API requests never reached the dev server — see §5 write-up before retrying |
 | Automated test suite | ❌ Not built | No test framework exists in repo at all |
 
 ---
@@ -325,6 +330,109 @@ pill — no rotation, no font choices), photos only (not video).
   - Verified after the fix with three separate 7-photo reproductions (solid-color test images, 7 full-resolution real photos totaling 8.75MB, and a live UI-driven Playwright run through the actual Create screen) — all three now return 200 with valid results and no console errors. Could not force a deterministic repro of the exact original failure (LLM output is inherently non-deterministic — one of the real-photo runs did legitimately trigger `copyrighted_material` policy flags on Windows wallpaper images, a later identical-input run did not), so the logging is the safety net if it recurs: check `logger.error` output for `rawModelText` and the zod/JSON error next time.
 - **Caption got wiped after editing it, then tapping an AI-suggested platform.** Root cause: tapping a platform did two things at once — select it *and* immediately call `/api/remix` to rewrite the caption in that platform's style, overwriting `editedCaption` with whatever the model returned. Confirmed live that `/api/remix`'s model can occasionally misinterpret unusual input as a "placeholder" and return a conversational non-caption reply instead of a rewrite (reproduced directly: feeding it a template-looking string like `MY_DISTINCTIVE_EDIT_12345` got back *"It looks like the original text didn't come through..."* instead of a rewritten caption) — that reply would silently become the new "caption." Fixed by decoupling the two actions entirely: selecting a platform (now a checkbox — see §3.7's redesign) is a pure state toggle that never touches `editedCaption`; optimizing for a platform's style is now a separate, explicit "Optimize for {Platform}" action the user triggers on purpose. Verified live: manually edited caption, checked/unchecked multiple platform checkboxes (0 `/api/remix` calls fired), then tapped "Optimize for Facebook" explicitly (exactly 1 call fired, correctly rewrote the manually-edited text while preserving its meaning).
 
+**Native Android testing — attempted, blocked, unresolved (this session, 2026-07-13). Read this before repeating any of it:**
+
+Goal was to verify the per-photo text overlay export feature (§3.9) on a
+real Android device. Got through the build/install setup successfully, but
+never got past a network-connectivity problem to actually test the
+feature itself. Full state, so the next session can pick up from here
+instead of re-deriving it:
+
+- **Durable infrastructure now in place (do NOT redo):**
+  - Logged into EAS/Expo as `statjunky73` (vincerito@gmail.com) — session
+    persists on this machine.
+  - Project linked: `@statjunky73/mobile`,
+    `extra.eas.projectId: fa81d0d3-cd9a-4d7b-a108-38bff3f1f46a` (now in
+    `app.json`).
+  - `artifacts/mobile/eas.json` created with `development` (dev-client,
+    internal distribution), `preview`, and `production` build profiles.
+  - `expo-dev-client` added as a dependency (required — a plain Expo Go
+    install cannot run this app since it has custom native modules from
+    the overlay feature).
+  - `app.json` gained `android.package: "com.statjunky73.imagine"` — a
+    placeholder chosen only to unblock a non-interactive build; treat as
+    provisional and confirm with the user before any real store
+    submission (this is the same kind of branding decision flagged
+    elsewhere in this doc as user-owned, not something to silently
+    finalize).
+  - A `development`-profile Android build completed successfully via EAS
+    cloud build and was installed on a real device
+    (`https://expo.dev/accounts/statjunky73/projects/mobile/builds/bb87a14d-5464-4284-9a0c-aae886a4e035`
+    — link will expire eventually, but the build config that produced it
+    is all saved in `eas.json`/`app.json`, so re-running
+    `npx eas-cli build --profile development --platform android
+    --non-interactive` should reproduce it).
+  - Gotcha for next time: `npx eas-cli login`'s browser flow starts a
+    local OAuth callback server that on the first attempt sometimes binds
+    to `::1` (IPv6 loopback) only — if the browser resolves `localhost` to
+    `127.0.0.1` instead, the callback silently never arrives and the login
+    hangs forever. Fix: kill it and run `eas-cli login` again; the retry
+    has reliably bound correctly (dual-stack) both times this happened.
+
+- **What was ruled out (confirmed working, do NOT re-check these first):**
+  - Windows Firewall: added an inbound allow rule, `"Imagine Dev API
+    Server (4300, Private)"`, TCP port 4300, Private profile only,
+    confirmed enabled via `Get-NetFirewallRule`.
+  - Norton 360: confirmed via the user's own Norton UI that `node.exe`
+    already shows "Allow" under Program Control, and the "Milly1" Wi-Fi
+    network was already trusted/set to Private (not Public) in Norton.
+  - Windows network profile: confirmed via `Get-NetConnectionProfile` that
+    "Milly1" is categorized `Private`, matching the firewall rule's scope.
+  - The dev machine's LAN IP was confirmed stable at `192.168.99.170`
+    throughout (re-checked multiple times across the session, never
+    drifted).
+  - The api-server was confirmed listening on all interfaces (`0.0.0.0`
+    and `[::]`, not just `127.0.0.1`) via `netstat`/`Get-NetTCPConnection`.
+  - **Payload size handling in the server itself is not the problem:**
+    sent a synthetic ~1.2MB POST (comparable to 3 real resized photos)
+    directly from the dev machine to its own LAN IP
+    (`http://192.168.99.170:4300/api/analyze-media`, not `localhost`) —
+    it completed in under a second (returned a legitimate 502 only because
+    the test used random bytes instead of real image data, which Claude's
+    vision API correctly rejected). This rules out Express body-parsing,
+    the 15mb JSON limit, or anything else in the request-handling code as
+    the bottleneck.
+  - **Caveat on that last test:** it still originated from the same
+    physical machine as the server (addressed to its own LAN IP), which
+    some routers "hairpin" locally rather than actually routing out over
+    Wi-Fi and back — so it does NOT fully rule out a problem specific to
+    the real wireless link between two distinct devices. This is exactly
+    where the trail went cold.
+
+- **What's still unexplained:** the phone's browser successfully loaded
+  `http://192.168.99.170:4300/api/healthz` at least once (confirmed via a
+  matching server-log entry with timestamp). But across multiple attempts
+  (1, 2, and 3 photos, separately) the app's actual `POST
+  /api/analyze-media` request **never once appeared in the server log** —
+  not even a failed/partial entry — while the client eventually failed
+  with the app's generic "Something went wrong. Please try again."
+  message, sometimes fast, once after a minute or longer. A request that
+  never reaches the server at all (vs. one that reaches it and fails)
+  points at the network path, not the application code — but the exact
+  mechanism was never pinned down.
+
+- **Leading unconfirmed hypothesis:** router-level AP/client isolation
+  (common on mesh systems and some ISP routers — devices show as "on the
+  same network" but can't reach each other directly), or Wi-Fi signal
+  quality/packet loss that a tiny GET survives but a much larger,
+  longer-lived POST does not. Neither was checked before pausing.
+
+- **Next steps for whoever resumes this:**
+  1. Check the router admin panel for "AP isolation" / "client isolation"
+     / "guest network isolation" and ensure it's off for the network both
+     devices use — this is the single most likely remaining cause and
+     was never actually checked.
+  2. As a fast isolating test: try the phone on a mobile hotspot *from the
+     dev machine* instead (or vice versa) to see if the same failure
+     follows the Wi-Fi network specifically.
+  3. Consider adding a raw connection-level log (before Express's
+     `express.json()` body-parser) to catch requests that arrive but never
+     finish sending their body — right now the pino "request completed"
+     log only fires after a full request is parsed, so a stalled/aborted
+     upload is invisible even if the TCP connection did open.
+  4. Do not re-litigate Windows Firewall, Norton, or the network profile —
+     all three are confirmed correctly configured as of this session.
+
 **Pre-existing, NOT introduced by any of this work — do not "fix" these without checking if it's in scope:**
 - `artifacts/mobile/hooks/useColors.ts` line ~21: `TS2352` type error casting the colors object. Present before any of this session's work.
 - Every API route file (`repurpose.ts`, `video-script.ts`, `media.ts`, `remix.ts`, `policy-check.ts`) shows a `TS6305` project-reference build error (`lib/integrations-anthropic-ai/dist/index.d.ts` not built from source) plus two `TS7006` implicit-`any` errors on the same lines in each file. This is a repo-wide tsconfig project-references quirk confirmed present on `main` before this feature work began (verified via `git stash` at the time). Runtime is unaffected — esbuild bundles from source directly, not from the unbuilt `.d.ts`.
@@ -338,7 +446,7 @@ pill — no rotation, no font choices), photos only (not video).
 ## 6. What still needs to be built (next priorities, suggested order)
 
 1. **Extend policy scanning to Scripts/Repurpose screens**, if wanted — `/api/policy-check-text` already exists and is generic; this is mostly frontend wiring (reuse `PolicyWarnings` component).
-2. **Native (iOS/Android) verification pass** — literally everything has only been tested via Expo web in a browser. Video frame extraction in particular (`extractVideoFrame.ts`, the native path) has not been exercised end-to-end with a real device/simulator this session. Same for the text-overlay export path (`exportOverlay.ts` — `react-native-view-shot` + `expo-media-library` + `expo-sharing`), which needs a dev client rebuild (new native modules, not just a JS reload) before it can even be tried.
+2. **Native (iOS/Android) verification pass** — a 2026-07-13 session got a real dev-client build onto an Android device (EAS build infra now set up, see §5's "Native Android testing" write-up) but hit an unresolved phone-to-dev-machine network connectivity problem before the app could actually be exercised: the phone's browser could reach the dev server, but the app's own API requests never did. **Start from §5's write-up, not from scratch** — the most likely remaining cause (router AP/client isolation) was identified but never checked. Video frame extraction (`extractVideoFrame.ts`, the native path) and the overlay export path (`exportOverlay.ts`) both still need actual on-device exercising once connectivity is sorted out.
 3. **Re-test the video-upload path** against the new pipeline (voice/context/policy/remix) — this session's live testing only exercised the photo path.
 4. **Remaining content types from the original vision**: blog articles, stories, emails, podcasts, AI image prompts. None have a backend route or screen yet. Follow the same pattern as `video-script.ts`/`media.ts`: dedicated endpoint + zod-validated structured response + a screen matching the existing visual language.
 5. **Branding decision**: rename in-app "Repurpose.ai" header text to "Imagine" — deferred as a user decision every time it's come up, never actioned. Ask before touching it.
